@@ -18,7 +18,10 @@ import {
   Flag,
   Upload,
   Loader2,
-  Check
+  Check,
+  List,
+  ListOrdered,
+  MapPin
 } from 'lucide-react';
 import WaveSurfer from 'wavesurfer.js';
 import { useStore, useCurrentEpisode } from '../store';
@@ -58,6 +61,7 @@ export default function EditingDesk() {
   const [volumeDb, setVolumeDb] = useState(episode?.targetVolumeDb || -16);
   const [normalizing, setNormalizing] = useState(false);
   const [normalizeResult, setNormalizeResult] = useState('');
+  const [activeSidebarTab, setActiveSidebarTab] = useState<'templates' | 'chapters' | 'timeline'>('timeline');
 
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
@@ -74,6 +78,142 @@ export default function EditingDesk() {
     if (outro) dur += outro.duration;
     return dur;
   }, [segments, intro, outro]);
+
+  type TimelineItem =
+    | { type: 'intro'; id: string; time: number; duration: number; title: string }
+    | { type: 'outro'; id: string; time: number; duration: number; title: string }
+    | { type: 'segment'; id: string; time: number; duration: number; title: string; segmentId: string; materialId: string; segStartTime: number }
+    | { type: 'chapter'; id: string; time: number; title: string; chapterId: string };
+
+  const timelinePreview = useMemo((): TimelineItem[] => {
+    const items: TimelineItem[] = [];
+    let cursor = 0;
+
+    if (intro) {
+      items.push({
+        type: 'intro',
+        id: 'intro',
+        time: 0,
+        duration: intro.duration,
+        title: intro.name
+      });
+      cursor += intro.duration;
+    }
+
+    for (const seg of segments) {
+      const segDuration = seg.endTime - seg.startTime;
+      items.push({
+        type: 'segment',
+        id: `seg-${seg.id}`,
+        time: cursor,
+        duration: segDuration,
+        title: seg.name,
+        segmentId: seg.id,
+        materialId: seg.materialId,
+        segStartTime: seg.startTime
+      });
+
+      const segStart = cursor;
+      const segEnd = cursor + segDuration;
+      for (const ch of chapters) {
+        if (ch.time >= seg.startTime && ch.time <= seg.endTime) {
+          const absTime = segStart + (ch.time - seg.startTime);
+          items.push({
+            type: 'chapter',
+            id: `ch-${ch.id}`,
+            time: absTime,
+            title: ch.title,
+            chapterId: ch.id
+          });
+        }
+      }
+
+      cursor += segDuration;
+    }
+
+    if (outro) {
+      items.push({
+        type: 'outro',
+        id: 'outro',
+        time: cursor,
+        duration: outro.duration,
+        title: outro.name
+      });
+    }
+
+    items.sort((a, b) => {
+      if (a.time !== b.time) return a.time - b.time;
+      const order = { intro: 0, segment: 1, chapter: 2, outro: 3 };
+      return order[a.type] - order[b.type];
+    });
+
+    return items;
+  }, [segments, chapters, intro, outro]);
+
+  const jumpToTimelineItem = async (item: TimelineItem) => {
+    if (item.type === 'segment' || item.type === 'chapter') {
+      let targetMaterialId: string | null = null;
+      let targetSegStartTime = 0;
+      let offsetInSeg = 0;
+
+      if (item.type === 'segment') {
+        targetMaterialId = item.materialId;
+        targetSegStartTime = item.segStartTime;
+        offsetInSeg = 0;
+      } else {
+        const seg = segments.find((s) => {
+          let segStart = 0;
+          if (intro) segStart += intro.duration;
+          for (const prevSeg of segments) {
+            if (prevSeg.id === s.id) break;
+            segStart += prevSeg.endTime - prevSeg.startTime;
+          }
+          const segEnd = segStart + (s.endTime - s.startTime);
+          return item.time >= segStart && item.time <= segEnd;
+        });
+        if (!seg) return;
+        targetMaterialId = seg.materialId;
+        targetSegStartTime = seg.startTime;
+        let segStart = intro ? intro.duration : 0;
+        for (const prevSeg of segments) {
+          if (prevSeg.id === seg.id) break;
+          segStart += prevSeg.endTime - prevSeg.startTime;
+        }
+        offsetInSeg = item.time - segStart;
+      }
+
+      if (selectedSegment?.materialId !== targetMaterialId) {
+        const targetSeg = segments.find((s) => s.materialId === targetMaterialId) || segments[0];
+        if (targetSeg) {
+          setSelectedSegmentId(targetSeg.id);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      setSelectedSegmentId(
+        segments.find((s) => s.materialId === targetMaterialId)?.id || selectedSegmentId
+      );
+
+      if (wavesurferRef.current) {
+        await new Promise((resolve) => {
+          const checkReady = () => {
+            if (wavesurferRef.current && wavesurferRef.current.getDuration() > 0) {
+              resolve(undefined);
+            } else {
+              setTimeout(checkReady, 50);
+            }
+          };
+          checkReady();
+        });
+
+        const targetSourceTime = targetSegStartTime + offsetInSeg;
+        const dur = wavesurferRef.current.getDuration();
+        wavesurferRef.current.seekTo(Math.max(0, Math.min(1, targetSourceTime / dur)));
+        wavesurferRef.current.play();
+        setTimeout(() => wavesurferRef.current?.pause(), 500);
+      }
+    }
+  };
 
   useEffect(() => {
     if (!waveformRef.current) return;
@@ -578,161 +718,308 @@ export default function EditingDesk() {
       </div>
 
       <aside className="flex w-80 flex-col border-l border-dark-800 bg-dark-900">
-        <div className="border-b border-dark-800 p-4">
+        <div className="flex border-b border-dark-800">
           <button
-            className="flex w-full items-center justify-between"
-            onClick={() => setShowTemplates((v) => !v)}
+            className={`flex-1 px-2 py-2.5 text-xs font-medium transition-colors ${
+              activeSidebarTab === 'templates'
+                ? 'border-b-2 border-primary-500 bg-primary-600/10 text-primary-300'
+                : 'text-dark-400 hover:text-dark-200'
+            }`}
+            onClick={() => setActiveSidebarTab('templates')}
           >
-            <div className="flex items-center gap-2">
-              <Music className="h-4 w-4 text-primary-400" />
-              <span className="font-semibold">片头片尾模板</span>
+            <div className="flex items-center justify-center gap-1">
+              <Music className="h-3.5 w-3.5" />
+              模板
             </div>
-            {showTemplates ? (
-              <ChevronUp className="h-4 w-4" />
-            ) : (
-              <ChevronDown className="h-4 w-4" />
-            )}
           </button>
-          {showTemplates && (
-            <div className="mt-3 space-y-3">
-              <div>
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="text-xs font-medium text-dark-500">片头模板</span>
-                  <button
-                    className="btn btn-ghost flex items-center gap-1 text-xs text-primary-400 hover:text-primary-300"
-                    onClick={() => handleImportTemplate('intro')}
-                  >
-                    <Upload className="h-3 w-3" />
-                    添加
-                  </button>
-                </div>
-                {templates.filter((t) => t.type === 'intro').length === 0 ? (
-                  <div className="text-xs text-dark-600">暂无，点击「添加」导入本地音频</div>
-                ) : (
-                  <div className="space-y-1">
-                    {templates
-                      .filter((t) => t.type === 'intro')
-                      .map((tpl) => (
-                        <div
-                          key={tpl.id}
-                          className={`flex items-center justify-between rounded px-2 py-1.5 text-sm ${
-                            intro?.id === tpl.id
-                              ? 'bg-primary-600/20 text-primary-300'
-                              : 'text-dark-300 hover:bg-dark-800'
-                          }`}
-                        >
-                          <button
-                            className="flex-1 text-left"
-                            onClick={() => handleApplyIntroTemplate(tpl.id)}
-                          >
-                            <span>{tpl.name}</span>
-                            <span className="ml-2 text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
-                          </button>
-                          <button
-                            className="btn btn-ghost p-0.5 text-dark-500 hover:text-red-400"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteTemplate(tpl.id);
-                              if (intro?.id === tpl.id) setIntro(undefined);
-                            }}
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </div>
-              <div>
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="text-xs font-medium text-dark-500">片尾模板</span>
-                  <button
-                    className="btn btn-ghost flex items-center gap-1 text-xs text-primary-400 hover:text-primary-300"
-                    onClick={() => handleImportTemplate('outro')}
-                  >
-                    <Upload className="h-3 w-3" />
-                    添加
-                  </button>
-                </div>
-                {templates.filter((t) => t.type === 'outro').length === 0 ? (
-                  <div className="text-xs text-dark-600">暂无，点击「添加」导入本地音频</div>
-                ) : (
-                  <div className="space-y-1">
-                    {templates
-                      .filter((t) => t.type === 'outro')
-                      .map((tpl) => (
-                        <div
-                          key={tpl.id}
-                          className={`flex items-center justify-between rounded px-2 py-1.5 text-sm ${
-                            outro?.id === tpl.id
-                              ? 'bg-primary-600/20 text-primary-300'
-                              : 'text-dark-300 hover:bg-dark-800'
-                          }`}
-                        >
-                          <button
-                            className="flex-1 text-left"
-                            onClick={() => handleApplyOutroTemplate(tpl.id)}
-                          >
-                            <span>{tpl.name}</span>
-                            <span className="ml-2 text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
-                          </button>
-                          <button
-                            className="btn btn-ghost p-0.5 text-dark-500 hover:text-red-400"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              deleteTemplate(tpl.id);
-                              if (outro?.id === tpl.id) setOutro(undefined);
-                            }}
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </div>
+          <button
+            className={`flex-1 px-2 py-2.5 text-xs font-medium transition-colors ${
+              activeSidebarTab === 'chapters'
+                ? 'border-b-2 border-primary-500 bg-primary-600/10 text-primary-300'
+                : 'text-dark-400 hover:text-dark-200'
+            }`}
+            onClick={() => setActiveSidebarTab('chapters')}
+          >
+            <div className="flex items-center justify-center gap-1">
+              <BookMarked className="h-3.5 w-3.5" />
+              章节
             </div>
-          )}
+          </button>
+          <button
+            className={`flex-1 px-2 py-2.5 text-xs font-medium transition-colors ${
+              activeSidebarTab === 'timeline'
+                ? 'border-b-2 border-primary-500 bg-primary-600/10 text-primary-300'
+                : 'text-dark-400 hover:text-dark-200'
+            }`}
+            onClick={() => setActiveSidebarTab('timeline')}
+          >
+            <div className="flex items-center justify-center gap-1">
+              <ListOrdered className="h-3.5 w-3.5" />
+              发布顺序
+            </div>
+          </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4">
-          <div className="mb-2 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-dark-300 flex items-center gap-1.5">
-              <BookMarked className="h-4 w-4" />
-              章节标记 ({chapters.length})
-            </h3>
-          </div>
-
-          {chapters.length === 0 ? (
-            <div className="py-8 text-center text-xs text-dark-500">
-              播放音频时点击「添加章节」创建标记
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {chapters.map((ch) => (
-                <div key={ch.id} className="rounded border border-dark-700 bg-dark-800 p-2">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs text-primary-400">
-                      {formatTimestamp(ch.time)}
-                    </span>
-                    <input
-                      type="text"
-                      className="flex-1 bg-transparent text-sm text-dark-100 focus:outline-none"
-                      value={ch.title}
-                      onChange={(e) => updateChapter(ch.id, { title: e.target.value })}
-                    />
+        {activeSidebarTab === 'templates' && (
+          <div className="flex-1 overflow-y-auto p-4">
+            <button
+              className="flex w-full items-center justify-between"
+              onClick={() => setShowTemplates((v) => !v)}
+            >
+              <div className="flex items-center gap-2">
+                <Music className="h-4 w-4 text-primary-400" />
+                <span className="font-semibold">片头片尾模板</span>
+              </div>
+              {showTemplates ? (
+                <ChevronUp className="h-4 w-4" />
+              ) : (
+                <ChevronDown className="h-4 w-4" />
+              )}
+            </button>
+            {showTemplates && (
+              <div className="mt-3 space-y-3">
+                <div>
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-xs font-medium text-dark-500">片头模板</span>
                     <button
-                      className="btn btn-ghost p-1 text-red-400 hover:text-red-300"
-                      onClick={() => deleteChapter(ch.id)}
+                      className="btn btn-ghost flex items-center gap-1 text-xs text-primary-400 hover:text-primary-300"
+                      onClick={() => handleImportTemplate('intro')}
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Upload className="h-3 w-3" />
+                      添加
                     </button>
                   </div>
+                  {templates.filter((t) => t.type === 'intro').length === 0 ? (
+                    <div className="text-xs text-dark-600">暂无，点击「添加」导入本地音频</div>
+                  ) : (
+                    <div className="space-y-1">
+                      {templates
+                        .filter((t) => t.type === 'intro')
+                        .map((tpl) => (
+                          <div
+                            key={tpl.id}
+                            className={`flex items-center justify-between rounded px-2 py-1.5 text-sm ${
+                              intro?.id === tpl.id
+                                ? 'bg-primary-600/20 text-primary-300'
+                                : 'text-dark-300 hover:bg-dark-800'
+                            }`}
+                          >
+                            <button
+                              className="flex-1 text-left"
+                              onClick={() => handleApplyIntroTemplate(tpl.id)}
+                            >
+                              <span>{tpl.name}</span>
+                              <span className="ml-2 text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
+                            </button>
+                            <button
+                              className="btn btn-ghost p-0.5 text-dark-500 hover:text-red-400"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteTemplate(tpl.id);
+                                if (intro?.id === tpl.id) setIntro(undefined);
+                              }}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  )}
                 </div>
-              ))}
+                <div>
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-xs font-medium text-dark-500">片尾模板</span>
+                    <button
+                      className="btn btn-ghost flex items-center gap-1 text-xs text-primary-400 hover:text-primary-300"
+                      onClick={() => handleImportTemplate('outro')}
+                    >
+                      <Upload className="h-3 w-3" />
+                      添加
+                    </button>
+                  </div>
+                  {templates.filter((t) => t.type === 'outro').length === 0 ? (
+                    <div className="text-xs text-dark-600">暂无，点击「添加」导入本地音频</div>
+                  ) : (
+                    <div className="space-y-1">
+                      {templates
+                        .filter((t) => t.type === 'outro')
+                        .map((tpl) => (
+                          <div
+                            key={tpl.id}
+                            className={`flex items-center justify-between rounded px-2 py-1.5 text-sm ${
+                              outro?.id === tpl.id
+                                ? 'bg-primary-600/20 text-primary-300'
+                                : 'text-dark-300 hover:bg-dark-800'
+                            }`}
+                          >
+                            <button
+                              className="flex-1 text-left"
+                              onClick={() => handleApplyOutroTemplate(tpl.id)}
+                            >
+                              <span>{tpl.name}</span>
+                              <span className="ml-2 text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
+                            </button>
+                            <button
+                              className="btn btn-ghost p-0.5 text-dark-500 hover:text-red-400"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteTemplate(tpl.id);
+                                if (outro?.id === tpl.id) setOutro(undefined);
+                              }}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeSidebarTab === 'chapters' && (
+          <div className="flex-1 overflow-y-auto p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-dark-300 flex items-center gap-1.5">
+                <BookMarked className="h-4 w-4" />
+                章节标记 ({chapters.length})
+              </h3>
             </div>
-          )}
-        </div>
+
+            {chapters.length === 0 ? (
+              <div className="py-8 text-center text-xs text-dark-500">
+                播放音频时点击「添加章节」创建标记
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {chapters.map((ch) => (
+                  <div key={ch.id} className="rounded border border-dark-700 bg-dark-800 p-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs text-primary-400">
+                        {formatTimestamp(ch.time)}
+                      </span>
+                      <input
+                        type="text"
+                        className="flex-1 bg-transparent text-sm text-dark-100 focus:outline-none"
+                        value={ch.title}
+                        onChange={(e) => updateChapter(ch.id, { title: e.target.value })}
+                      />
+                      <button
+                        className="btn btn-ghost p-1 text-red-400 hover:text-red-300"
+                        onClick={() => deleteChapter(ch.id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeSidebarTab === 'timeline' && (
+          <div className="flex-1 overflow-hidden flex flex-col">
+            <div className="border-b border-dark-800 p-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-dark-300 flex items-center gap-1.5">
+                  <ListOrdered className="h-4 w-4" />
+                  发布顺序预览
+                </h3>
+                <span className="text-xs text-dark-500">
+                  {formatDuration(totalDuration)}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-dark-500">
+                点击项目跳转到对应音频位置
+              </p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3">
+              {timelinePreview.length === 0 ? (
+                <div className="py-8 text-center text-xs text-dark-500">
+                  暂无内容，请从素材库添加片段
+                </div>
+              ) : (
+                <div className="relative">
+                  <div className="absolute left-[17px] top-2 bottom-2 w-px bg-dark-700" />
+                  <div className="space-y-0.5">
+                    {timelinePreview.map((item) => {
+                      const isChapter = item.type === 'chapter';
+                      const canJump = item.type === 'segment' || item.type === 'chapter';
+                      const TypeIcon =
+                        item.type === 'intro' ? Rewind :
+                        item.type === 'outro' ? FastForward :
+                        item.type === 'chapter' ? MapPin : List;
+                      const itemColor =
+                        item.type === 'intro' ? 'text-primary-400' :
+                        item.type === 'outro' ? 'text-primary-400' :
+                        item.type === 'chapter' ? 'text-amber-400' :
+                        'text-dark-300';
+                      return (
+                        <button
+                          key={item.id}
+                          className={`group relative flex w-full items-start gap-2 rounded p-1.5 text-left transition-colors ${
+                            canJump ? 'cursor-pointer hover:bg-dark-800' : 'cursor-default'
+                          } ${isChapter ? 'pl-6' : ''}`}
+                          onClick={() => canJump && jumpToTimelineItem(item)}
+                          disabled={!canJump}
+                        >
+                          <div className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full ${
+                            isChapter ? 'bg-dark-800' : 'bg-dark-700'
+                          }`}>
+                            <TypeIcon className={`h-3 w-3 ${itemColor}`} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-xs text-dark-500">
+                                {formatTimestamp(item.time)}
+                              </span>
+                              {item.type !== 'chapter' && (
+                                <span className="text-xs text-dark-600">
+                                  ({formatDuration(item.duration)})
+                                </span>
+                              )}
+                            </div>
+                            <div className={`text-sm ${
+                              isChapter ? 'text-amber-300' : 'text-dark-200'
+                            } ${isChapter ? 'text-xs' : ''} truncate`}>
+                              {item.title}
+                            </div>
+                          </div>
+                          {canJump && (
+                            <div className="opacity-0 transition-opacity group-hover:opacity-100">
+                              <Play className="h-3 w-3 text-primary-400" />
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-dark-800 p-3">
+              <div className="flex flex-wrap gap-2 text-[10px] text-dark-500">
+                <span className="inline-flex items-center gap-1">
+                  <Rewind className="h-2.5 w-2.5 text-primary-400" /> 片头
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <List className="h-2.5 w-2.5 text-dark-300" /> 片段
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <MapPin className="h-2.5 w-2.5 text-amber-400" /> 章节
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <FastForward className="h-2.5 w-2.5 text-primary-400" /> 片尾
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </aside>
     </div>
   );

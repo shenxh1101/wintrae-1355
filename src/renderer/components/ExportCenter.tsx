@@ -15,13 +15,26 @@ import {
   Clock,
   Volume2,
   AlertCircle,
-  Loader2
+  Loader2,
+  X,
+  AlertTriangle,
+  CheckCircle,
+  FolderOpen,
+  Package,
+  Music
 } from 'lucide-react';
 import { useStore, useCurrentEpisode } from '../store';
 import { formatDuration, formatTimestamp, EPISODE_STATUS_LABELS, parseTimeString } from '@shared/utils';
 import type { TimelineEntry, EpisodeProgress } from '@shared/types';
 import { renderEpisodeAudio } from '../utils/audioProcessor';
 import { encodeWav, encodeMp3 } from '../utils/audioEncoder';
+import {
+  runPreCheck,
+  exportReleasePackage,
+  buildBaseName,
+  type PreCheckResult,
+  type PreCheckIssue
+} from '../utils/exportUtils';
 
 export default function ExportCenter() {
   const episode = useCurrentEpisode();
@@ -37,6 +50,11 @@ export default function ExportCenter() {
   const [newTimelineDesc, setNewTimelineDesc] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState('');
+  const [showPreCheck, setShowPreCheck] = useState(false);
+  const [preCheckResult, setPreCheckResult] = useState<PreCheckResult | null>(null);
+  const [preCheckRunning, setPreCheckRunning] = useState(false);
+  const [pendingExportMode, setPendingExportMode] = useState<'audio' | 'package' | null>(null);
+  const [exportedFiles, setExportedFiles] = useState<string[]>([]);
 
   if (!episode) return null;
 
@@ -101,20 +119,37 @@ export default function ExportCenter() {
     setTimeline(updated);
   };
 
-  const handleExportAudio = async () => {
-    if (exporting || !episode) return;
-    if (episode.segments.length === 0 && !episode.intro && !episode.outro) {
-      alert('没有可导出的音频内容，请先在剪辑台添加片段。');
-      return;
-    }
+  const doPreCheck = async (mode: 'audio' | 'package'): Promise<boolean> => {
+    setPreCheckRunning(true);
+    setShowPreCheck(true);
+    setPendingExportMode(mode);
 
+    try {
+      const result = await runPreCheck(episode);
+      setPreCheckResult(result);
+      return result.passed;
+    } finally {
+      setPreCheckRunning(false);
+    }
+  };
+
+  const handleExportAudio = async () => {
+    if (exporting) return;
+    const ok = await doPreCheck('audio');
+    if (!ok) return;
+    proceedWithExportAudio();
+  };
+
+  const proceedWithExportAudio = async () => {
+    if (!episode) return;
     setExporting(true);
     setExportProgress('正在选择保存路径...');
+    setShowPreCheck(false);
+    setPendingExportMode(null);
 
     try {
       const ext = episode.exportFormat;
-      const safeTitle = (episode.title || 'episode').replace(/[\\/:*?"<>|]/g, '_');
-      const defaultName = `${episode.episodeNumber ? episode.episodeNumber + ' - ' : ''}${safeTitle}.${ext}`;
+      const defaultName = `${buildBaseName(episode)}.${ext}`;
 
       let filePath: string | undefined;
       if (window.electronAPI) {
@@ -134,11 +169,8 @@ export default function ExportCenter() {
 
       if (ext === 'wav') {
         fileData = encodeWav(rendered);
-      } else if (ext === 'mp3') {
-        fileData = await encodeMp3(rendered, episode.exportBitrate);
       } else {
-        fileData = encodeWav(rendered);
-        filePath = filePath.replace(/\.[^.]+$/, '.wav');
+        fileData = await encodeMp3(rendered, episode.exportBitrate);
       }
 
       setExportProgress('正在写入文件...');
@@ -147,14 +179,58 @@ export default function ExportCenter() {
           ? Array.from(fileData)
           : Array.from(new Uint8Array(fileData));
         await window.electronAPI.writeBinaryFile(filePath, arr);
+        setExportedFiles([filePath]);
       }
 
       setExportProgress('导出完成！');
-      setTimeout(() => setExportProgress(''), 3000);
+      setTimeout(() => setExportProgress(''), 5000);
     } catch (e) {
       console.error('Export failed:', e);
       setExportProgress(`导出失败: ${e instanceof Error ? e.message : String(e)}`);
-      setTimeout(() => setExportProgress(''), 5000);
+      setTimeout(() => setExportProgress(''), 8000);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleExportPackage = async () => {
+    if (exporting) return;
+    const ok = await doPreCheck('package');
+    if (!ok) return;
+    proceedWithExportPackage();
+  };
+
+  const proceedWithExportPackage = async () => {
+    if (!episode) return;
+    setExporting(true);
+    setExportProgress('正在选择输出目录...');
+    setShowPreCheck(false);
+    setPendingExportMode(null);
+
+    try {
+      let directory: string | null = null;
+      if (window.electronAPI) {
+        directory = await window.electronAPI.selectDirectory();
+      }
+      if (!directory) {
+        setExporting(false);
+        setExportProgress('');
+        return;
+      }
+
+      const files = await exportReleasePackage({
+        directory,
+        episode,
+        onProgress: (msg) => setExportProgress(msg)
+      });
+
+      setExportedFiles(files);
+      setExportProgress(`发布包导出完成！共生成 ${files.length} 个文件`);
+      setTimeout(() => setExportProgress(''), 8000);
+    } catch (e) {
+      console.error('Package export failed:', e);
+      setExportProgress(`导出失败: ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setExportProgress(''), 10000);
     } finally {
       setExporting(false);
     }
@@ -175,6 +251,14 @@ export default function ExportCenter() {
     setTimeline(merged.sort((a, b) => a.time - b.time));
   };
 
+  const handleForceExport = () => {
+    if (pendingExportMode === 'audio') {
+      proceedWithExportAudio();
+    } else if (pendingExportMode === 'package') {
+      proceedWithExportPackage();
+    }
+  };
+
   const progressPercent = useMemo(() => {
     let score = 0;
     if (episode.title) score += 10;
@@ -188,6 +272,11 @@ export default function ExportCenter() {
     else if (episode.reviewItems.length === 0) score += 0;
     return Math.min(100, score);
   }, [episode, pendingReviews]);
+
+  const getIssueIcon = (issue: PreCheckIssue) => {
+    if (issue.type === 'error') return <AlertCircle className="h-4 w-4 text-red-400 flex-shrink-0" />;
+    return <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0" />;
+  };
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -303,7 +392,7 @@ export default function ExportCenter() {
             <input
               type="text"
               className="input col-span-3 font-mono"
-              placeholder="时间 如 120"
+              placeholder="时间 如 120 / 02:00.500"
               value={newTimelineTime}
               onChange={(e) => setNewTimelineTime(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleAddTimeline()}
@@ -433,10 +522,8 @@ export default function ExportCenter() {
                   )
                 }
               >
-                <option value="mp3">MP3 (通用)</option>
-                <option value="wav">WAV (无损)</option>
-                <option value="m4a">M4A/AAC (高效)</option>
-                <option value="flac">FLAC (无损压缩)</option>
+                <option value="mp3">MP3 (通用，兼容性好)</option>
+                <option value="wav">WAV (无损，高质量)</option>
               </select>
             </div>
             <div>
@@ -500,7 +587,7 @@ export default function ExportCenter() {
           <button
             className="btn btn-primary flex w-full items-center justify-center gap-2 py-2.5 text-base"
             onClick={handleExportAudio}
-            disabled={exporting}
+            disabled={exporting || preCheckRunning}
           >
             {exporting ? (
               <>
@@ -509,8 +596,26 @@ export default function ExportCenter() {
               </>
             ) : (
               <>
-                <Download className="h-5 w-5" />
-                导出音频文件
+                <Music className="h-5 w-5" />
+                仅导出音频
+              </>
+            )}
+          </button>
+          <button
+            className="btn btn-primary mt-2 flex w-full items-center justify-center gap-2 py-2.5 text-base"
+            onClick={handleExportPackage}
+            disabled={exporting || preCheckRunning}
+            style={{ background: 'linear-gradient(135deg, #0ea5e9, #8b5cf6)' }}
+          >
+            {exporting ? (
+              <>
+                <Loader2 className="h-5 w-5 animate-spin" />
+                导出中...
+              </>
+            ) : (
+              <>
+                <Package className="h-5 w-5" />
+                导出完整发布包
               </>
             )}
           </button>
@@ -521,6 +626,19 @@ export default function ExportCenter() {
               'bg-primary-500/10 text-primary-300'
             }`}>
               {exportProgress}
+            </div>
+          )}
+          {exportedFiles.length > 0 && !exportProgress && (
+            <div className="mt-2 rounded-md bg-dark-800 px-3 py-2">
+              <div className="mb-1 text-xs font-medium text-dark-400">已生成文件：</div>
+              <ul className="space-y-0.5 text-xs text-dark-300 break-all">
+                {exportedFiles.map((f, i) => (
+                  <li key={i} className="flex items-start gap-1">
+                    <Check className="mt-0.5 h-3 w-3 flex-shrink-0 text-green-400" />
+                    <span>{f.split('\\').pop()}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
           <button
@@ -534,6 +652,115 @@ export default function ExportCenter() {
           </button>
         </div>
       </aside>
+
+      {showPreCheck && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-[520px] max-w-[90vw] overflow-hidden rounded-xl border border-dark-700 bg-dark-800 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-dark-700 px-5 py-4">
+              <h3 className="text-lg font-bold">导出前预检</h3>
+              <button
+                className="btn btn-ghost p-1 text-dark-400 hover:text-dark-100"
+                onClick={() => {
+                  setShowPreCheck(false);
+                  setPendingExportMode(null);
+                }}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-5">
+              {preCheckRunning ? (
+                <div className="flex flex-col items-center justify-center py-8">
+                  <Loader2 className="mb-3 h-10 w-10 animate-spin text-primary-400" />
+                  <p className="text-sm text-dark-300">正在检查...</p>
+                  <p className="mt-1 text-xs text-dark-500">
+                    验证审听项、文件完整性、模板可用性
+                  </p>
+                </div>
+              ) : preCheckResult ? (
+                <>
+                  <div className={`mb-4 flex items-center gap-3 rounded-lg p-3 ${
+                    preCheckResult.passed ? 'bg-green-500/10' : 'bg-red-500/10'
+                  }`}>
+                    {preCheckResult.passed ? (
+                      <CheckCircle className="h-8 w-8 text-green-400 flex-shrink-0" />
+                    ) : (
+                      <AlertCircle className="h-8 w-8 text-red-400 flex-shrink-0" />
+                    )}
+                    <div>
+                      <div className={`font-semibold ${
+                        preCheckResult.passed ? 'text-green-300' : 'text-red-300'
+                      }`}>
+                        {preCheckResult.passed ? '预检通过，可以开始导出' : '发现问题，建议先处理'}
+                      </div>
+                      <div className="text-xs text-dark-400">
+                        {preCheckResult.issues.length} 项问题 ·
+                        {preCheckResult.issues.filter((i) => i.type === 'error').length} 项错误 ·
+                        {preCheckResult.issues.filter((i) => i.type === 'warning').length} 项警告
+                      </div>
+                    </div>
+                  </div>
+
+                  {preCheckResult.issues.length > 0 && (
+                    <div className="mb-4 max-h-[220px] space-y-2 overflow-y-auto">
+                      {preCheckResult.issues.map((issue, idx) => (
+                        <div
+                          key={idx}
+                          className={`flex gap-2 rounded-lg border p-3 ${
+                            issue.type === 'error'
+                              ? 'border-red-500/30 bg-red-500/5'
+                              : 'border-amber-500/30 bg-amber-500/5'
+                          }`}
+                        >
+                          {getIssueIcon(issue)}
+                          <div className="min-w-0 flex-1">
+                            <div className={`text-sm font-medium ${
+                              issue.type === 'error' ? 'text-red-300' : 'text-amber-300'
+                            }`}>
+                              {issue.message}
+                            </div>
+                            {issue.detail && (
+                              <div className="mt-0.5 text-xs text-dark-400 break-all">
+                                {issue.detail}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-dark-700 bg-dark-850 px-5 py-4" style={{ background: '#0c1320' }}>
+              <button
+                className="btn btn-ghost"
+                onClick={() => {
+                  setShowPreCheck(false);
+                  setPendingExportMode(null);
+                }}
+              >
+                取消
+              </button>
+              {preCheckResult && !preCheckResult.passed && preCheckResult.issues.some((i) => i.type === 'warning') && (
+                <button
+                  className="btn btn-secondary"
+                  onClick={handleForceExport}
+                  disabled={preCheckResult.issues.some((i) => i.type === 'error')}
+                  title={preCheckResult.issues.some((i) => i.type === 'error') ? '存在错误，无法强制导出' : '忽略警告继续导出'}
+                >
+                  忽略警告，强制导出
+                </button>
+              )}
+              {preCheckResult && preCheckResult.passed && (
+                <button className="btn btn-primary" onClick={handleForceExport}>
+                  {pendingExportMode === 'package' ? '开始导出发布包' : '开始导出音频'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

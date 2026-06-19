@@ -86,7 +86,7 @@ export interface EpisodeProgress {
   description: string;
   timeline: TimelineEntry[];
   coverChecks: CoverCheckItem[];
-  exportFormat: 'mp3' | 'wav' | 'm4a' | 'flac';
+  exportFormat: 'mp3' | 'wav';
   exportBitrate: number;
   targetVolumeDb: number;
 }

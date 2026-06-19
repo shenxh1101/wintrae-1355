@@ -66,9 +66,7 @@ ipcMain.handle('dialog:saveFile', async (_event, defaultName: string) => {
     defaultPath: defaultName,
     filters: [
       { name: 'MP3 音频', extensions: ['mp3'] },
-      { name: 'WAV 音频', extensions: ['wav'] },
-      { name: 'M4A 音频', extensions: ['m4a'] },
-      { name: 'FLAC 音频', extensions: ['flac'] }
+      { name: 'WAV 音频', extensions: ['wav'] }
     ]
   });
   return result.filePath;
