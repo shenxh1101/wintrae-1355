@@ -14,7 +14,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('fs:readBinaryFile', filePath),
   fileExists: (filePath: string) => ipcRenderer.invoke('fs:fileExists', filePath),
   stat: (filePath: string) => ipcRenderer.invoke('fs:stat', filePath),
-  getDataPath: () => ipcRenderer.invoke('app:getDataPath')
+  getDataPath: () => ipcRenderer.invoke('app:getDataPath'),
+  openPath: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
+  showItemInFolder: (filePath: string) => ipcRenderer.invoke('shell:showItemInFolder', filePath)
 });
 
 export type ElectronAPI = {
@@ -28,4 +30,6 @@ export type ElectronAPI = {
   fileExists: (filePath: string) => Promise<boolean>;
   stat: (filePath: string) => Promise<{ size: number; mtime: string; birthtime: string }>;
   getDataPath: () => Promise<string>;
+  openPath: (filePath: string) => Promise<boolean>;
+  showItemInFolder: (filePath: string) => Promise<boolean>;
 };

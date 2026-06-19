@@ -1,5 +1,5 @@
-import type { EpisodeProgress } from '@shared/types';
-import { formatTimestamp } from '@shared/utils';
+import type { EpisodeProgress, ExportMode, ExportFileRecord } from '@shared/types';
+import { formatTimestamp, EPISODE_STATUS_LABELS, AUDIO_SOURCE_LABELS } from '@shared/utils';
 import { renderEpisodeAudio } from './audioProcessor';
 import { encodeWav, encodeMp3 } from './audioEncoder';
 
@@ -132,10 +132,16 @@ export interface ReleasePackageOptions {
   onProgress?: (message: string) => void;
 }
 
-export async function exportReleasePackage(options: ReleasePackageOptions): Promise<string[]> {
+export interface ExportPackageResult {
+  filePaths: string[];
+  fileRecords: ExportFileRecord[];
+}
+
+export async function exportReleasePackage(options: ReleasePackageOptions): Promise<ExportPackageResult> {
   const { directory, episode, onProgress } = options;
   const baseName = buildBaseName(episode);
   const exportedFiles: string[] = [];
+  const fileRecords: ExportFileRecord[] = [];
   const ext = episode.exportFormat;
 
   const audioFileName = `${baseName}.${ext}`;
@@ -159,6 +165,7 @@ export async function exportReleasePackage(options: ReleasePackageOptions): Prom
       : Array.from(new Uint8Array(fileData));
     await window.electronAPI.writeBinaryFile(audioFilePath, arr);
     exportedFiles.push(audioFilePath);
+    fileRecords.push({ fileName: audioFileName, fileType: 'audio', sizeBytes: arr.length });
   }
 
   const descFileName = `${baseName} - 节目简介.txt`;
@@ -167,6 +174,7 @@ export async function exportReleasePackage(options: ReleasePackageOptions): Prom
   if (window.electronAPI) {
     await window.electronAPI.writeFile(descFilePath, descContent);
     exportedFiles.push(descFilePath);
+    fileRecords.push({ fileName: descFileName, fileType: 'description', sizeBytes: descContent.length });
   }
 
   const timelineFileName = `${baseName} - 时间轴文案.txt`;
@@ -175,6 +183,7 @@ export async function exportReleasePackage(options: ReleasePackageOptions): Prom
   if (window.electronAPI) {
     await window.electronAPI.writeFile(timelineFilePath, timelineContent);
     exportedFiles.push(timelineFilePath);
+    fileRecords.push({ fileName: timelineFileName, fileType: 'timeline', sizeBytes: timelineContent.length });
   }
 
   const coverFileName = `${baseName} - 封面检查清单.txt`;
@@ -183,9 +192,19 @@ export async function exportReleasePackage(options: ReleasePackageOptions): Prom
   if (window.electronAPI) {
     await window.electronAPI.writeFile(coverFilePath, coverContent);
     exportedFiles.push(coverFilePath);
+    fileRecords.push({ fileName: coverFileName, fileType: 'cover', sizeBytes: coverContent.length });
   }
 
-  return exportedFiles;
+  const releaseNotesFileName = `${baseName} - 发布说明.txt`;
+  const releaseNotesFilePath = `${directory}\\${releaseNotesFileName}`;
+  const releaseNotesContent = buildReleaseNotesText(episode);
+  if (window.electronAPI) {
+    await window.electronAPI.writeFile(releaseNotesFilePath, releaseNotesContent);
+    exportedFiles.push(releaseNotesFilePath);
+    fileRecords.push({ fileName: releaseNotesFileName, fileType: 'releaseNotes', sizeBytes: releaseNotesContent.length });
+  }
+
+  return { filePaths: exportedFiles, fileRecords };
 }
 
 function buildDescriptionText(episode: EpisodeProgress): string {
@@ -290,6 +309,91 @@ function buildCoverCheckText(episode: EpisodeProgress): string {
   lines.push('  - 封面尺寸建议 3000×3000 px（各平台通用）');
   lines.push('  - 图片格式建议 JPG 或 PNG');
   lines.push('  - 文件大小建议 < 5MB');
+  lines.push('');
+  return lines.join('\n');
+}
+
+function buildReleaseNotesText(episode: EpisodeProgress): string {
+  const lines: string[] = [];
+  lines.push('='.repeat(60));
+  lines.push('发布说明');
+  lines.push('='.repeat(60));
+  lines.push('');
+
+  lines.push('【基本信息】');
+  lines.push(`  节目标题：${episode.title || '未命名节目'}`);
+  lines.push(`  期数：${episode.episodeNumber || '（未设置）'}`);
+  lines.push(`  节目状态：${EPISODE_STATUS_LABELS[episode.status]}`);
+  lines.push(`  总时长：${formatTimestamp(calculateTotalDuration(episode))}`);
+  lines.push('');
+
+  lines.push('【导出配置】');
+  lines.push(`  音频格式：${episode.exportFormat.toUpperCase()}`);
+  lines.push(`  比特率：${episode.exportBitrate} kbps`);
+  lines.push(`  目标响度：${episode.targetVolumeDb} LUFS`);
+  lines.push('');
+
+  const resolved = episode.reviewItems.filter((r) => r.status === 'resolved').length;
+  const total = episode.reviewItems.length;
+  lines.push('【审听状态】');
+  lines.push(`  审听项总数：${total}`);
+  lines.push(`  已解决：${resolved}`);
+  lines.push(`  待处理：${total - resolved}`);
+  if (total === 0) {
+    lines.push(`  状态：未创建审听项`);
+  } else if (resolved === total) {
+    lines.push(`  状态：✅ 全部已解决`);
+  } else {
+    lines.push(`  状态：⚠️ 还有 ${total - resolved} 项未处理`);
+  }
+  lines.push('');
+
+  const coverChecked = episode.coverChecks.filter((c) => c.checked).length;
+  const coverTotal = episode.coverChecks.length;
+  lines.push('【封面完成情况】');
+  lines.push(`  完成进度：${coverChecked} / ${coverTotal}`);
+  if (coverTotal > 0) {
+    lines.push(`  完成度：${Math.round((coverChecked / coverTotal) * 100)}%`);
+  }
+  for (const c of episode.coverChecks) {
+    lines.push(`  ${c.checked ? '[✓]' : '[ ]'} ${c.label}`);
+  }
+  lines.push('');
+
+  lines.push('【素材来源】');
+  lines.push(`  素材总数：${episode.materials.length}`);
+  for (const mat of episode.materials) {
+    const src = AUDIO_SOURCE_LABELS?.[mat.source] || mat.source;
+    lines.push(`  · ${mat.name}`);
+    lines.push(`      时长：${formatTimestamp(mat.duration)}  |  来源：${src}`);
+    if (mat.guests.length > 0) {
+      lines.push(`      嘉宾：${mat.guests.join('、')}`);
+    }
+    if (mat.topics.length > 0) {
+      lines.push(`      主题：${mat.topics.map((t) => `#${t}`).join(' ')}`);
+    }
+  }
+  lines.push('');
+
+  lines.push('【片段编排】');
+  lines.push(`  片头：${episode.intro ? `${episode.intro.name}（${formatTimestamp(episode.intro.duration)}）` : '未设置'}`);
+  lines.push(`  片段数量：${episode.segments.length}`);
+  for (let i = 0; i < episode.segments.length; i++) {
+    const seg = episode.segments[i];
+    const mat = episode.materials.find((m) => m.id === seg.materialId);
+    lines.push(`  ${i + 1}. ${seg.name}`);
+    lines.push(`      源：${mat?.name || '（素材已删除）'}  |  截取：${formatTimestamp(seg.startTime)} - ${formatTimestamp(seg.endTime)}`);
+  }
+  lines.push(`  片尾：${episode.outro ? `${episode.outro.name}（${formatTimestamp(episode.outro.duration)}）` : '未设置'}`);
+  lines.push('');
+
+  lines.push('【章节数量】');
+  lines.push(`  共 ${episode.chapters.length} 个章节标记`);
+  lines.push('');
+
+  lines.push('');
+  lines.push('-'.repeat(60));
+  lines.push(`生成时间：${new Date().toLocaleString('zh-CN')}`);
   lines.push('');
   return lines.join('\n');
 }

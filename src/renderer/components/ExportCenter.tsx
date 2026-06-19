@@ -21,11 +21,17 @@ import {
   CheckCircle,
   FolderOpen,
   Package,
-  Music
+  Music,
+  History,
+  RefreshCw,
+  ExternalLink,
+  File,
+  ChevronRight,
+  ChevronDown
 } from 'lucide-react';
 import { useStore, useCurrentEpisode } from '../store';
-import { formatDuration, formatTimestamp, EPISODE_STATUS_LABELS, parseTimeString } from '@shared/utils';
-import type { TimelineEntry, EpisodeProgress } from '@shared/types';
+import { formatDuration, formatTimestamp, EPISODE_STATUS_LABELS, parseTimeString, formatFileSize } from '@shared/utils';
+import type { TimelineEntry, EpisodeProgress, ExportRecord } from '@shared/types';
 import { renderEpisodeAudio } from '../utils/audioProcessor';
 import { encodeWav, encodeMp3 } from '../utils/audioEncoder';
 import {
@@ -33,7 +39,8 @@ import {
   exportReleasePackage,
   buildBaseName,
   type PreCheckResult,
-  type PreCheckIssue
+  type PreCheckIssue,
+  type ExportPackageResult
 } from '../utils/exportUtils';
 
 export default function ExportCenter() {
@@ -42,6 +49,9 @@ export default function ExportCenter() {
   const setTimeline = useStore((s) => s.setTimeline);
   const setCoverCheck = useStore((s) => s.setCoverCheck);
   const setExportConfig = useStore((s) => s.setExportConfig);
+  const addExportRecord = useStore((s) => s.addExportRecord);
+  const deleteExportRecord = useStore((s) => s.deleteExportRecord);
+  const allExportRecords = useStore((s) => s.exportRecords);
 
   const [copiedDesc, setCopiedDesc] = useState(false);
   const [copiedTimeline, setCopiedTimeline] = useState(false);
@@ -55,6 +65,8 @@ export default function ExportCenter() {
   const [preCheckRunning, setPreCheckRunning] = useState(false);
   const [pendingExportMode, setPendingExportMode] = useState<'audio' | 'package' | null>(null);
   const [exportedFiles, setExportedFiles] = useState<string[]>([]);
+  const [historyExpanded, setHistoryExpanded] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
   if (!episode) return null;
 
@@ -69,6 +81,11 @@ export default function ExportCenter() {
   }, [episode]);
 
   const pendingReviews = episode.reviewItems.filter((r) => r.status !== 'resolved').length;
+
+  const currentExportRecords = useMemo(
+    () => allExportRecords.filter((r) => r.episodeId === episode.id),
+    [allExportRecords, episode?.id]
+  );
 
   const timelineText = useMemo(() => {
     const lines: string[] = [];
@@ -119,15 +136,15 @@ export default function ExportCenter() {
     setTimeline(updated);
   };
 
-  const doPreCheck = async (mode: 'audio' | 'package'): Promise<boolean> => {
+  const doPreCheck = async (mode: 'audio' | 'package') => {
     setPreCheckRunning(true);
     setShowPreCheck(true);
     setPendingExportMode(mode);
+    setPreCheckResult(null);
 
     try {
       const result = await runPreCheck(episode);
       setPreCheckResult(result);
-      return result.passed;
     } finally {
       setPreCheckRunning(false);
     }
@@ -135,9 +152,7 @@ export default function ExportCenter() {
 
   const handleExportAudio = async () => {
     if (exporting) return;
-    const ok = await doPreCheck('audio');
-    if (!ok) return;
-    proceedWithExportAudio();
+    await doPreCheck('audio');
   };
 
   const proceedWithExportAudio = async () => {
@@ -180,6 +195,33 @@ export default function ExportCenter() {
           : Array.from(new Uint8Array(fileData));
         await window.electronAPI.writeBinaryFile(filePath, arr);
         setExportedFiles([filePath]);
+
+        const warnings = preCheckResult?.issues.filter((i) => i.type === 'warning').length || 0;
+        const resolved = episode.reviewItems.filter((r) => r.status === 'resolved').length;
+        const coverChecked = episode.coverChecks.filter((c) => c.checked).length;
+
+        addExportRecord({
+          episodeId: episode.id,
+          mode: 'audio',
+          exportedAt: new Date().toISOString(),
+          targetPath: filePath,
+          format: ext,
+          bitrate: episode.exportBitrate,
+          targetVolumeDb: episode.targetVolumeDb,
+          totalDurationSeconds: totalDuration,
+          reviewItemsTotal: episode.reviewItems.length,
+          reviewItemsResolved: resolved,
+          coverChecked,
+          coverTotal: episode.coverChecks.length,
+          preCheckWarnings: warnings,
+          files: [
+            {
+              fileName: filePath.split('\\').pop() || defaultName,
+              fileType: 'audio',
+              sizeBytes: arr.length
+            }
+          ]
+        });
       }
 
       setExportProgress('导出完成！');
@@ -195,9 +237,7 @@ export default function ExportCenter() {
 
   const handleExportPackage = async () => {
     if (exporting) return;
-    const ok = await doPreCheck('package');
-    if (!ok) return;
-    proceedWithExportPackage();
+    await doPreCheck('package');
   };
 
   const proceedWithExportPackage = async () => {
@@ -218,14 +258,36 @@ export default function ExportCenter() {
         return;
       }
 
-      const files = await exportReleasePackage({
+      const result: ExportPackageResult = await exportReleasePackage({
         directory,
         episode,
         onProgress: (msg) => setExportProgress(msg)
       });
 
-      setExportedFiles(files);
-      setExportProgress(`发布包导出完成！共生成 ${files.length} 个文件`);
+      setExportedFiles(result.filePaths);
+
+      const warnings = preCheckResult?.issues.filter((i) => i.type === 'warning').length || 0;
+      const resolved = episode.reviewItems.filter((r) => r.status === 'resolved').length;
+      const coverChecked = episode.coverChecks.filter((c) => c.checked).length;
+
+      addExportRecord({
+        episodeId: episode.id,
+        mode: 'package',
+        exportedAt: new Date().toISOString(),
+        targetPath: directory,
+        format: episode.exportFormat,
+        bitrate: episode.exportBitrate,
+        targetVolumeDb: episode.targetVolumeDb,
+        totalDurationSeconds: totalDuration,
+        reviewItemsTotal: episode.reviewItems.length,
+        reviewItemsResolved: resolved,
+        coverChecked,
+        coverTotal: episode.coverChecks.length,
+        preCheckWarnings: warnings,
+        files: result.fileRecords
+      });
+
+      setExportProgress(`发布包导出完成！共生成 ${result.filePaths.length} 个文件`);
       setTimeout(() => setExportProgress(''), 8000);
     } catch (e) {
       console.error('Package export failed:', e);
@@ -257,6 +319,36 @@ export default function ExportCenter() {
     } else if (pendingExportMode === 'package') {
       proceedWithExportPackage();
     }
+  };
+
+  const openRecordLocation = async (record: ExportRecord) => {
+    if (!window.electronAPI) return;
+    try {
+      if (record.mode === 'audio') {
+        await window.electronAPI.showItemInFolder(record.targetPath);
+      } else {
+        await window.electronAPI.openPath(record.targetPath);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const reExportFromRecord = async (record: ExportRecord) => {
+    if (exporting) return;
+    if (record.mode === 'audio') {
+      await doPreCheck('audio');
+    } else {
+      await doPreCheck('package');
+    }
+  };
+
+  const fileTypeLabel: Record<string, string> = {
+    audio: '音频',
+    description: '节目简介',
+    timeline: '时间轴文案',
+    cover: '封面检查清单',
+    releaseNotes: '发布说明'
   };
 
   const progressPercent = useMemo(() => {
@@ -577,7 +669,151 @@ export default function ExportCenter() {
           </div>
         </div>
 
-        <div className="flex-1" />
+        <div className="flex-1 overflow-y-auto border-b border-dark-800">
+          <button
+            className="flex w-full items-center justify-between px-4 py-3 hover:bg-dark-800/50 transition-colors"
+            onClick={() => setShowHistory((v) => !v)}
+          >
+            <div className="flex items-center gap-2">
+              <History className="h-4 w-4 text-primary-400" />
+              <span className="font-semibold text-sm">
+                导出历史
+              </span>
+              <span className="rounded bg-dark-700 px-1.5 py-0.5 text-[10px] text-dark-300">
+                {currentExportRecords.length}
+              </span>
+            </div>
+            {showHistory ? (
+              <ChevronDown className="h-4 w-4 text-dark-400" />
+            ) : (
+              <ChevronRight className="h-4 w-4 text-dark-400" />
+            )}
+          </button>
+          {showHistory && (
+            <div className="px-3 pb-3 space-y-2">
+              {currentExportRecords.length === 0 ? (
+                <div className="py-4 text-center text-xs text-dark-500">
+                  暂无导出记录
+                </div>
+              ) : (
+                currentExportRecords.map((rec) => (
+                  <div
+                    key={rec.id}
+                    className="rounded border border-dark-700 bg-dark-800/50 overflow-hidden"
+                  >
+                    <button
+                      className="flex w-full items-center justify-between px-2.5 py-2 hover:bg-dark-800"
+                      onClick={() =>
+                        setHistoryExpanded((cur) => (cur === rec.id ? null : rec.id))
+                      }
+                    >
+                      <div className="min-w-0 flex-1 text-left">
+                        <div className="flex items-center gap-1.5">
+                          {rec.mode === 'package' ? (
+                            <Package className="h-3.5 w-3.5 text-primary-400" />
+                          ) : (
+                            <Music className="h-3.5 w-3.5 text-primary-400" />
+                          )}
+                          <span className="text-xs font-medium text-dark-200 truncate">
+                            {rec.mode === 'package' ? '完整发布包' : '单音频'}
+                          </span>
+                          {rec.preCheckWarnings > 0 && (
+                            <span className="rounded bg-amber-500/10 px-1 text-[10px] text-amber-300">
+                              ⚠ {rec.preCheckWarnings}
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-dark-500">
+                          {new Date(rec.exportedAt).toLocaleString('zh-CN')}
+                        </div>
+                      </div>
+                      {historyExpanded === rec.id ? (
+                        <ChevronDown className="h-3.5 w-3.5 text-dark-400 flex-shrink-0" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 text-dark-400 flex-shrink-0" />
+                      )}
+                    </button>
+                    {historyExpanded === rec.id && (
+                      <div className="border-t border-dark-700 bg-dark-850 p-2.5" style={{ background: '#0c1320' }}>
+                        <div className="mb-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[11px]">
+                          <div className="text-dark-500">格式</div>
+                          <div className="text-dark-300">
+                            {rec.format.toUpperCase()} · {rec.bitrate} kbps
+                          </div>
+                          <div className="text-dark-500">时长</div>
+                          <div className="text-dark-300">{formatDuration(rec.totalDurationSeconds)}</div>
+                          <div className="text-dark-500">审听</div>
+                          <div className="text-dark-300">
+                            {rec.reviewItemsResolved}/{rec.reviewItemsTotal}
+                            {rec.reviewItemsTotal > 0 &&
+                              rec.reviewItemsResolved === rec.reviewItemsTotal && (
+                                <Check className="inline h-3 w-3 ml-1 text-green-400" />
+                              )}
+                          </div>
+                          <div className="text-dark-500">封面</div>
+                          <div className="text-dark-300">
+                            {rec.coverChecked}/{rec.coverTotal}
+                          </div>
+                          <div className="text-dark-500 col-span-2 truncate">
+                            {rec.targetPath}
+                          </div>
+                        </div>
+                        <div className="mb-2">
+                          <div className="mb-1 text-[11px] text-dark-500">文件清单</div>
+                          <div className="space-y-1">
+                            {rec.files.map((f, i) => (
+                              <div
+                                key={i}
+                                className="flex items-center gap-1.5 rounded bg-dark-800 px-2 py-1"
+                              >
+                                <File className="h-3 w-3 text-dark-400 flex-shrink-0" />
+                                <span className="min-w-0 flex-1 truncate text-[11px] text-dark-300">
+                                  {f.fileName}
+                                </span>
+                                <span className="text-[10px] text-dark-500">
+                                  {fileTypeLabel[f.fileType]}
+                                </span>
+                                {typeof f.sizeBytes === 'number' && (
+                                  <span className="text-[10px] text-dark-500">
+                                    {formatFileSize(f.sizeBytes)}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex gap-1.5">
+                          <button
+                            className="btn btn-secondary flex-1 flex items-center justify-center gap-1 text-xs py-1"
+                            onClick={() => openRecordLocation(rec)}
+                          >
+                            <FolderOpen className="h-3 w-3" />
+                            打开文件夹
+                          </button>
+                          <button
+                            className="btn btn-secondary flex-1 flex items-center justify-center gap-1 text-xs py-1"
+                            onClick={() => reExportFromRecord(rec)}
+                            disabled={exporting}
+                          >
+                            <RefreshCw className="h-3 w-3" />
+                            按配置重新导出
+                          </button>
+                          <button
+                            className="btn btn-ghost p-1 text-dark-500 hover:text-red-400"
+                            onClick={() => deleteExportRecord(rec.id)}
+                            title="删除此记录"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
 
         <div className="border-t border-dark-800 p-4">
           <div className="mb-2 text-xs text-dark-500 flex items-center gap-1">
@@ -679,27 +915,40 @@ export default function ExportCenter() {
                 </div>
               ) : preCheckResult ? (
                 <>
-                  <div className={`mb-4 flex items-center gap-3 rounded-lg p-3 ${
-                    preCheckResult.passed ? 'bg-green-500/10' : 'bg-red-500/10'
-                  }`}>
-                    {preCheckResult.passed ? (
-                      <CheckCircle className="h-8 w-8 text-green-400 flex-shrink-0" />
-                    ) : (
-                      <AlertCircle className="h-8 w-8 text-red-400 flex-shrink-0" />
-                    )}
-                    <div>
-                      <div className={`font-semibold ${
-                        preCheckResult.passed ? 'text-green-300' : 'text-red-300'
-                      }`}>
-                        {preCheckResult.passed ? '预检通过，可以开始导出' : '发现问题，建议先处理'}
+                  {(() => {
+                    const hasErrors = preCheckResult.issues.some((i) => i.type === 'error');
+                    const hasWarnings = preCheckResult.issues.some((i) => i.type === 'warning');
+                    let boxClass = 'bg-green-500/10';
+                    let icon = <CheckCircle className="h-8 w-8 text-green-400 flex-shrink-0" />;
+                    let titleClass = 'text-green-300';
+                    let titleText = '预检通过，可以开始导出';
+                    if (hasErrors) {
+                      boxClass = 'bg-red-500/10';
+                      icon = <AlertCircle className="h-8 w-8 text-red-400 flex-shrink-0" />;
+                      titleClass = 'text-red-300';
+                      titleText = '发现错误，请修复后再导出';
+                    } else if (hasWarnings) {
+                      boxClass = 'bg-amber-500/10';
+                      icon = <AlertTriangle className="h-8 w-8 text-amber-400 flex-shrink-0" />;
+                      titleClass = 'text-amber-300';
+                      titleText = '发现提醒项，建议处理后导出';
+                    }
+                    return (
+                      <div className={`mb-4 flex items-center gap-3 rounded-lg p-3 ${boxClass}`}>
+                        {icon}
+                        <div>
+                          <div className={`font-semibold ${titleClass}`}>
+                            {titleText}
+                          </div>
+                          <div className="text-xs text-dark-400">
+                            {preCheckResult.issues.length} 项问题 ·
+                            {preCheckResult.issues.filter((i) => i.type === 'error').length} 项错误 ·
+                            {preCheckResult.issues.filter((i) => i.type === 'warning').length} 项警告
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-xs text-dark-400">
-                        {preCheckResult.issues.length} 项问题 ·
-                        {preCheckResult.issues.filter((i) => i.type === 'error').length} 项错误 ·
-                        {preCheckResult.issues.filter((i) => i.type === 'warning').length} 项警告
-                      </div>
-                    </div>
-                  </div>
+                    );
+                  })()}
 
                   {preCheckResult.issues.length > 0 && (
                     <div className="mb-4 max-h-[220px] space-y-2 overflow-y-auto">
@@ -742,21 +991,30 @@ export default function ExportCenter() {
               >
                 取消
               </button>
-              {preCheckResult && !preCheckResult.passed && preCheckResult.issues.some((i) => i.type === 'warning') && (
-                <button
-                  className="btn btn-secondary"
-                  onClick={handleForceExport}
-                  disabled={preCheckResult.issues.some((i) => i.type === 'error')}
-                  title={preCheckResult.issues.some((i) => i.type === 'error') ? '存在错误，无法强制导出' : '忽略警告继续导出'}
-                >
-                  忽略警告，强制导出
-                </button>
-              )}
-              {preCheckResult && preCheckResult.passed && (
-                <button className="btn btn-primary" onClick={handleForceExport}>
-                  {pendingExportMode === 'package' ? '开始导出发布包' : '开始导出音频'}
-                </button>
-              )}
+              {preCheckResult && (() => {
+                const hasErrors = preCheckResult.issues.some((i) => i.type === 'error');
+                const hasWarnings = preCheckResult.issues.some((i) => i.type === 'warning');
+                let btnLabel = pendingExportMode === 'package' ? '开始导出发布包' : '开始导出音频';
+                let btnTitle = '';
+                if (hasWarnings && !hasErrors) {
+                  btnLabel = '继续导出（忽略警告）';
+                  btnTitle = '存在未处理项，仍可继续导出';
+                }
+                if (hasErrors) {
+                  btnLabel = '存在错误，无法导出';
+                  btnTitle = '请修复错误后再导出';
+                }
+                return (
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleForceExport}
+                    disabled={hasErrors || preCheckRunning}
+                    title={btnTitle}
+                  >
+                    {btnLabel}
+                  </button>
+                );
+              })()}
             </div>
           </div>
         </div>

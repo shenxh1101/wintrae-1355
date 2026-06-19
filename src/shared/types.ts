@@ -1,5 +1,31 @@
 export type AudioSource = 'host' | 'guest' | 'remote' | 'field' | 'music' | 'other';
 
+export type ExportMode = 'audio' | 'package';
+
+export interface ExportFileRecord {
+  fileName: string;
+  fileType: 'audio' | 'description' | 'timeline' | 'cover' | 'releaseNotes';
+  sizeBytes?: number;
+}
+
+export interface ExportRecord {
+  id: string;
+  episodeId: string;
+  mode: ExportMode;
+  exportedAt: string;
+  targetPath: string;
+  format: 'mp3' | 'wav';
+  bitrate: number;
+  targetVolumeDb: number;
+  totalDurationSeconds: number;
+  reviewItemsTotal: number;
+  reviewItemsResolved: number;
+  coverChecked: number;
+  coverTotal: number;
+  files: ExportFileRecord[];
+  preCheckWarnings: number;
+}
+
 export interface AudioMaterial {
   id: string;
   name: string;
@@ -95,4 +121,5 @@ export interface AppState {
   currentEpisodeId: string | null;
   episodes: EpisodeProgress[];
   templates: IntroOutroTemplate[];
+  exportRecords: ExportRecord[];
 }

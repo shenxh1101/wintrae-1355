@@ -62,6 +62,7 @@ export default function EditingDesk() {
   const [normalizing, setNormalizing] = useState(false);
   const [normalizeResult, setNormalizeResult] = useState('');
   const [activeSidebarTab, setActiveSidebarTab] = useState<'templates' | 'chapters' | 'timeline'>('timeline');
+  const [highlightedTimelineId, setHighlightedTimelineId] = useState<string | null>(null);
 
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
@@ -150,7 +151,56 @@ export default function EditingDesk() {
     return items;
   }, [segments, chapters, intro, outro]);
 
+  const playTemplatePreview = (template: { filePath: string; volume: number }) => {
+    if (!waveformRef.current) return;
+    if (wavesurferRef.current) {
+      wavesurferRef.current.destroy();
+      wavesurferRef.current = null;
+    }
+    wavesurferRef.current = WaveSurfer.create({
+      container: waveformRef.current,
+      waveColor: '#475569',
+      progressColor: '#8b5cf6',
+      cursorColor: '#f8fafc',
+      cursorWidth: 2,
+      height: 120,
+      barWidth: 2,
+      barGap: 1,
+      barRadius: 2,
+      normalize: true
+    });
+    const filePath = 'file:///' + template.filePath.replace(/\\/g, '/');
+    wavesurferRef.current.load(filePath);
+    wavesurferRef.current.on('ready', () => {
+      if (wavesurferRef.current) {
+        wavesurferRef.current.setVolume(template.volume);
+        wavesurferRef.current.seekTo(0);
+        wavesurferRef.current.play();
+        setTimeout(() => wavesurferRef.current?.pause(), 1500);
+      }
+    });
+    wavesurferRef.current.on('audioprocess', () => {
+      if (wavesurferRef.current) {
+        setCurrentTime(wavesurferRef.current.getCurrentTime());
+      }
+    });
+    wavesurferRef.current.on('finish', () => setIsPlaying(false));
+    wavesurferRef.current.on('play', () => setIsPlaying(true));
+    wavesurferRef.current.on('pause', () => setIsPlaying(false));
+  };
+
   const jumpToTimelineItem = async (item: TimelineItem) => {
+    setHighlightedTimelineId(item.id);
+
+    if (item.type === 'intro') {
+      if (intro) playTemplatePreview(intro);
+      return;
+    }
+    if (item.type === 'outro') {
+      if (outro) playTemplatePreview(outro);
+      return;
+    }
+
     if (item.type === 'segment' || item.type === 'chapter') {
       let targetMaterialId: string | null = null;
       let targetSegStartTime = 0;
@@ -948,7 +998,9 @@ export default function EditingDesk() {
                   <div className="space-y-0.5">
                     {timelinePreview.map((item) => {
                       const isChapter = item.type === 'chapter';
-                      const canJump = item.type === 'segment' || item.type === 'chapter';
+                      const hasTemplate = item.type === 'intro' ? !!intro : item.type === 'outro' ? !!outro : true;
+                      const canJump = hasTemplate;
+                      const isHighlighted = highlightedTimelineId === item.id;
                       const TypeIcon =
                         item.type === 'intro' ? Rewind :
                         item.type === 'outro' ? FastForward :
@@ -961,20 +1013,26 @@ export default function EditingDesk() {
                       return (
                         <button
                           key={item.id}
-                          className={`group relative flex w-full items-start gap-2 rounded p-1.5 text-left transition-colors ${
-                            canJump ? 'cursor-pointer hover:bg-dark-800' : 'cursor-default'
-                          } ${isChapter ? 'pl-6' : ''}`}
+                          className={`group relative flex w-full items-start gap-2 rounded p-1.5 text-left transition-all ${
+                            canJump ? 'cursor-pointer hover:bg-dark-800' : 'cursor-default opacity-50'
+                          } ${isChapter ? 'pl-6' : ''} ${
+                            isHighlighted
+                              ? 'bg-primary-600/15 border border-primary-500/40 ring-1 ring-primary-500/30'
+                              : 'border border-transparent'
+                          }`}
                           onClick={() => canJump && jumpToTimelineItem(item)}
                           disabled={!canJump}
                         >
                           <div className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full ${
-                            isChapter ? 'bg-dark-800' : 'bg-dark-700'
+                            isHighlighted ? 'bg-primary-500/40' : isChapter ? 'bg-dark-800' : 'bg-dark-700'
                           }`}>
-                            <TypeIcon className={`h-3 w-3 ${itemColor}`} />
+                            <TypeIcon className={`h-3 w-3 ${isHighlighted ? 'text-primary-200' : itemColor}`} />
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
-                              <span className="font-mono text-xs text-dark-500">
+                              <span className={`font-mono text-xs ${
+                                isHighlighted ? 'text-primary-300' : 'text-dark-500'
+                              }`}>
                                 {formatTimestamp(item.time)}
                               </span>
                               {item.type !== 'chapter' && (
@@ -984,14 +1042,18 @@ export default function EditingDesk() {
                               )}
                             </div>
                             <div className={`text-sm ${
-                              isChapter ? 'text-amber-300' : 'text-dark-200'
-                            } ${isChapter ? 'text-xs' : ''} truncate`}>
+                              isChapter ? 'text-amber-300' : isHighlighted ? 'text-primary-100' : 'text-dark-200'
+                            } ${isChapter ? 'text-xs' : ''} truncate font-medium`}>
                               {item.title}
                             </div>
                           </div>
                           {canJump && (
-                            <div className="opacity-0 transition-opacity group-hover:opacity-100">
-                              <Play className="h-3 w-3 text-primary-400" />
+                            <div className={`transition-opacity ${
+                              isHighlighted ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                            }`}>
+                              <Play className={`h-3 w-3 ${
+                                isHighlighted ? 'text-primary-200' : 'text-primary-400'
+                              }`} />
                             </div>
                           )}
                         </button>

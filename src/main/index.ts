@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 
@@ -114,4 +114,22 @@ ipcMain.handle('fs:stat', async (_event, filePath: string) => {
 
 ipcMain.handle('app:getDataPath', () => {
   return app.getPath('userData');
+});
+
+ipcMain.handle('shell:openPath', async (_event, filePath: string) => {
+  try {
+    const result = await shell.openPath(filePath);
+    return result === '';
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle('shell:showItemInFolder', async (_event, filePath: string) => {
+  try {
+    shell.showItemInFolder(filePath);
+    return true;
+  } catch {
+    return false;
+  }
 });

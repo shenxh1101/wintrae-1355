@@ -9,7 +9,8 @@ import type {
   ReviewItem,
   TimelineEntry,
   CoverCheckItem,
-  AppState
+  AppState,
+  ExportRecord
 } from '@shared/types';
 
 const DEFAULT_COVER_CHECKS: Omit<CoverCheckItem, 'id'>[] = [
@@ -78,6 +79,9 @@ interface Store extends AppState {
   addTemplate: (template: Omit<IntroOutroTemplate, 'id'>) => void;
   deleteTemplate: (id: string) => void;
 
+  addExportRecord: (record: Omit<ExportRecord, 'id'>) => void;
+  deleteExportRecord: (id: string) => void;
+
   loadFromStorage: (data: AppState) => void;
 }
 
@@ -87,6 +91,7 @@ export const useStore = create<Store>((set, get) => {
     currentEpisodeId: initialEpisode.id,
     episodes: [initialEpisode],
     templates: [],
+    exportRecords: [],
 
     setCurrentEpisode: (id) => set({ currentEpisodeId: id }),
 
@@ -410,6 +415,16 @@ export const useStore = create<Store>((set, get) => {
     deleteTemplate: (id) =>
       set((state) => ({
         templates: state.templates.filter((t) => t.id !== id)
+      })),
+
+    addExportRecord: (record) =>
+      set((state) => ({
+        exportRecords: [{ ...record, id: uuidv4() }, ...state.exportRecords]
+      })),
+
+    deleteExportRecord: (id) =>
+      set((state) => ({
+        exportRecords: state.exportRecords.filter((r) => r.id !== id)
       })),
 
     loadFromStorage: (data) => set(data)
