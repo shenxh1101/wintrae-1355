@@ -1,7 +1,8 @@
-import type { EpisodeProgress, ExportMode, ExportFileRecord } from '@shared/types';
-import { formatTimestamp, EPISODE_STATUS_LABELS, AUDIO_SOURCE_LABELS } from '@shared/utils';
+import type { EpisodeProgress, ExportMode, ExportFileRecord, ExportRecord, VerificationDigest, FileVerification } from '@shared/types';
+import { formatTimestamp, EPISODE_STATUS_LABELS, AUDIO_SOURCE_LABELS, formatFileSize, formatDuration } from '@shared/utils';
 import { renderEpisodeAudio } from './audioProcessor';
 import { encodeWav, encodeMp3 } from './audioEncoder';
+import { decodeAudioFile } from './audioProcessor';
 
 export interface PreCheckIssue {
   type: 'error' | 'warning';
@@ -406,4 +407,88 @@ function calculateTotalDuration(episode: EpisodeProgress): number {
   }
   if (episode.outro) dur += episode.outro.duration;
   return dur;
+}
+
+export async function verifyExportRecord(record: ExportRecord): Promise<VerificationDigest> {
+  const fileVerifications: FileVerification[] = [];
+  let totalAudioDuration = 0;
+  let allFilesExist = true;
+  let allSizesMatch = true;
+
+  for (const f of record.files) {
+    const filePath =
+      record.mode === 'package'
+        ? `${record.targetPath}\\${f.fileName}`
+        : record.targetPath;
+
+    const exists = !!(await window.electronAPI?.fileExists(filePath));
+    let actualSize: number | undefined;
+    let audioDuration: number | undefined;
+    let sizeMatch = true;
+    let durationMatch = true;
+
+    if (exists) {
+      try {
+        const stat = await window.electronAPI?.stat(filePath);
+        actualSize = stat?.size;
+        if (f.sizeBytes != null && actualSize != null) {
+          const diff = Math.abs(actualSize - f.sizeBytes);
+          sizeMatch = diff / f.sizeBytes < 0.01;
+          if (!sizeMatch) allSizesMatch = false;
+        }
+        if (f.fileType === 'audio' && window.electronAPI) {
+          try {
+            const buf = await decodeAudioFile(filePath);
+            audioDuration = buf.duration;
+            totalAudioDuration += audioDuration;
+            durationMatch = Math.abs(audioDuration - record.totalDurationSeconds) < 1.0;
+          } catch {
+            durationMatch = false;
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    } else {
+      allFilesExist = false;
+      sizeMatch = false;
+      if (f.fileType === 'audio') durationMatch = false;
+    }
+
+    fileVerifications.push({
+      fileName: f.fileName,
+      fileType: f.fileType,
+      expectedSizeBytes: f.sizeBytes,
+      actualSizeBytes: actualSize,
+      exists,
+      audioDurationSeconds: audioDuration,
+      sizeMatch,
+      durationMatch: f.fileType === 'audio' ? durationMatch : undefined
+    });
+  }
+
+  const audioFile = fileVerifications.find((f) => f.fileType === 'audio');
+  const durationMatch = audioFile ? !!audioFile.durationMatch : true;
+
+  const parts: string[] = [];
+  parts.push(allFilesExist ? '✅ 所有文件存在' : '❌ 存在文件缺失');
+  parts.push(allSizesMatch ? '✅ 文件大小匹配' : '⚠️ 文件大小不一致');
+  if (audioFile) {
+    parts.push(
+      durationMatch
+        ? `✅ 音频时长匹配（${formatDuration(totalAudioDuration)}）`
+        : `⚠️ 音频时长不符（预期 ${formatDuration(record.totalDurationSeconds)}，实际 ${formatDuration(totalAudioDuration)}）`
+    );
+  }
+
+  return {
+    verifiedAt: new Date().toISOString(),
+    allFilesExist,
+    allSizesMatch,
+    durationMatch,
+    totalAudioDurationSeconds: totalAudioDuration || undefined,
+    expectedDurationSeconds: record.totalDurationSeconds,
+    files: fileVerifications,
+    summary: parts.join(' · ')
+  };
 }

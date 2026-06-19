@@ -30,17 +30,19 @@ import {
   ChevronDown
 } from 'lucide-react';
 import { useStore, useCurrentEpisode } from '../store';
-import { formatDuration, formatTimestamp, EPISODE_STATUS_LABELS, parseTimeString, formatFileSize } from '@shared/utils';
-import type { TimelineEntry, EpisodeProgress, ExportRecord } from '@shared/types';
+import { formatDuration, formatTimestamp, EPISODE_STATUS_LABELS, parseTimeString, formatFileSize, DELIVERY_STATUS_LABELS, DELIVERY_STATUS_COLORS } from '@shared/utils';
+import type { TimelineEntry, EpisodeProgress, ExportRecord, DeliveryStatus } from '@shared/types';
 import { renderEpisodeAudio } from '../utils/audioProcessor';
 import { encodeWav, encodeMp3 } from '../utils/audioEncoder';
 import {
   runPreCheck,
   exportReleasePackage,
   buildBaseName,
+  verifyExportRecord,
   type PreCheckResult,
   type PreCheckIssue,
-  type ExportPackageResult
+  type ExportPackageResult,
+  type VerificationDigest
 } from '../utils/exportUtils';
 
 export default function ExportCenter() {
@@ -50,7 +52,9 @@ export default function ExportCenter() {
   const setCoverCheck = useStore((s) => s.setCoverCheck);
   const setExportConfig = useStore((s) => s.setExportConfig);
   const addExportRecord = useStore((s) => s.addExportRecord);
+  const updateExportRecord = useStore((s) => s.updateExportRecord);
   const deleteExportRecord = useStore((s) => s.deleteExportRecord);
+  const setEpisodeDeliveryStatus = useStore((s) => s.setEpisodeDeliveryStatus);
   const allExportRecords = useStore((s) => s.exportRecords);
 
   const [copiedDesc, setCopiedDesc] = useState(false);
@@ -67,6 +71,7 @@ export default function ExportCenter() {
   const [exportedFiles, setExportedFiles] = useState<string[]>([]);
   const [historyExpanded, setHistoryExpanded] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [verifyingRecordId, setVerifyingRecordId] = useState<string | null>(null);
 
   if (!episode) return null;
 
@@ -203,6 +208,7 @@ export default function ExportCenter() {
         addExportRecord({
           episodeId: episode.id,
           mode: 'audio',
+          status: 'exported',
           exportedAt: new Date().toISOString(),
           targetPath: filePath,
           format: ext,
@@ -222,6 +228,34 @@ export default function ExportCenter() {
             }
           ]
         });
+
+        const state = useStore.getState();
+        const latest = state.exportRecords[0];
+        if (latest) {
+          setVerifyingRecordId(latest.id);
+          try {
+            const digest = await verifyExportRecord(latest);
+            const allGood = digest.allFilesExist && digest.allSizesMatch && digest.durationMatch;
+            const newStatus: DeliveryStatus = allGood ? 'verified' : 'exported';
+            updateExportRecord(latest.id, {
+              verificationDigest: digest,
+              status: newStatus
+            });
+            if (newStatus === 'verified') {
+              setEpisodeDeliveryStatus(episode.id, 'verified');
+            } else {
+              setEpisodeDeliveryStatus(episode.id, 'exported');
+            }
+            setExportProgress(`导出完成！${digest.summary}`);
+          } catch (e) {
+            console.error('Verify failed:', e);
+            setEpisodeDeliveryStatus(episode.id, 'exported');
+          } finally {
+            setVerifyingRecordId(null);
+          }
+        } else {
+          setEpisodeDeliveryStatus(episode.id, 'exported');
+        }
       }
 
       setExportProgress('导出完成！');
@@ -273,6 +307,7 @@ export default function ExportCenter() {
       addExportRecord({
         episodeId: episode.id,
         mode: 'package',
+        status: 'exported',
         exportedAt: new Date().toISOString(),
         targetPath: directory,
         format: episode.exportFormat,
@@ -287,7 +322,33 @@ export default function ExportCenter() {
         files: result.fileRecords
       });
 
-      setExportProgress(`发布包导出完成！共生成 ${result.filePaths.length} 个文件`);
+      const state = useStore.getState();
+      const latest = state.exportRecords[0];
+      if (latest) {
+        setVerifyingRecordId(latest.id);
+        try {
+          const digest = await verifyExportRecord(latest);
+          const allGood = digest.allFilesExist && digest.allSizesMatch && digest.durationMatch;
+          const newStatus: DeliveryStatus = allGood ? 'verified' : 'exported';
+          updateExportRecord(latest.id, {
+            verificationDigest: digest,
+            status: newStatus
+          });
+          if (newStatus === 'verified') {
+            setEpisodeDeliveryStatus(episode.id, 'verified');
+          } else {
+            setEpisodeDeliveryStatus(episode.id, 'exported');
+          }
+          setExportProgress(`发布包导出完成！共生成 ${result.filePaths.length} 个文件 · ${digest.summary}`);
+        } catch (e) {
+          console.error('Verify failed:', e);
+          setEpisodeDeliveryStatus(episode.id, 'exported');
+        } finally {
+          setVerifyingRecordId(null);
+        }
+      } else {
+        setEpisodeDeliveryStatus(episode.id, 'exported');
+      }
       setTimeout(() => setExportProgress(''), 8000);
     } catch (e) {
       console.error('Package export failed:', e);
@@ -335,12 +396,30 @@ export default function ExportCenter() {
   };
 
   const reExportFromRecord = async (record: ExportRecord) => {
-    if (exporting) return;
-    if (record.mode === 'audio') {
-      await doPreCheck('audio');
-    } else {
-      await doPreCheck('package');
+    if (exporting || verifyingRecordId) return;
+    setExportConfig(record.format, record.bitrate, record.targetVolumeDb);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await doPreCheck(record.mode);
+  };
+
+  const reVerifyRecord = async (record: ExportRecord) => {
+    if (verifyingRecordId || exporting) return;
+    setVerifyingRecordId(record.id);
+    try {
+      const digest = await verifyExportRecord(record);
+      const allGood = digest.allFilesExist && digest.allSizesMatch && digest.durationMatch;
+      const newStatus: DeliveryStatus = allGood ? 'verified' : 'exported';
+      updateExportRecord(record.id, {
+        verificationDigest: digest,
+        status: newStatus
+      });
+    } finally {
+      setVerifyingRecordId(null);
     }
+  };
+
+  const updateRecordStatus = (recordId: string, newStatus: DeliveryStatus) => {
+    updateExportRecord(recordId, { status: newStatus });
   };
 
   const fileTypeLabel: Record<string, string> = {
@@ -388,6 +467,9 @@ export default function ExportCenter() {
                 </span>
                 <span className="rounded bg-dark-700 px-2 py-0.5 text-xs font-medium text-dark-200">
                   {EPISODE_STATUS_LABELS[episode.status]}
+                </span>
+                <span className={`rounded px-2 py-0.5 text-xs font-medium ${DELIVERY_STATUS_COLORS[episode.deliveryStatus]}`}>
+                  {DELIVERY_STATUS_LABELS[episode.deliveryStatus]}
                 </span>
               </div>
             </div>
@@ -722,6 +804,12 @@ export default function ExportCenter() {
                               ⚠ {rec.preCheckWarnings}
                             </span>
                           )}
+                          <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${DELIVERY_STATUS_COLORS[rec.status]}`}>
+                            {DELIVERY_STATUS_LABELS[rec.status]}
+                          </span>
+                          {verifyingRecordId === rec.id && (
+                            <Loader2 className="h-3 w-3 animate-spin text-primary-400" />
+                          )}
                         </div>
                         <div className="mt-0.5 text-[11px] text-dark-500">
                           {new Date(rec.exportedAt).toLocaleString('zh-CN')}
@@ -758,8 +846,47 @@ export default function ExportCenter() {
                             {rec.targetPath}
                           </div>
                         </div>
+
+                        {rec.verificationDigest && (
+                          <div className="mb-2">
+                            <div className="mb-1 flex items-center justify-between">
+                              <div className="text-[11px] text-dark-500">校验摘要</div>
+                              <div className="text-[10px] text-dark-500">
+                                {new Date(rec.verificationDigest.verifiedAt).toLocaleString('zh-CN')}
+                              </div>
+                            </div>
+                            <div className={`rounded p-2 text-[11px] ${
+                              rec.verificationDigest.allFilesExist && rec.verificationDigest.allSizesMatch && rec.verificationDigest.durationMatch
+                                ? 'bg-green-500/10 text-green-300'
+                                : 'bg-amber-500/10 text-amber-300'
+                            }`}>
+                              {rec.verificationDigest.summary}
+                            </div>
+                            <div className="mt-1 space-y-0.5">
+                              {rec.verificationDigest.files.map((vf, i) => (
+                                <div key={i} className="flex items-center gap-1.5 text-[10px]">
+                                  {vf.exists ? (
+                                    <CheckCircle className="h-2.5 w-2.5 text-green-400 flex-shrink-0" />
+                                  ) : (
+                                    <AlertCircle className="h-2.5 w-2.5 text-red-400 flex-shrink-0" />
+                                  )}
+                                  <span className="min-w-0 flex-1 truncate text-dark-300">{vf.fileName}</span>
+                                  {vf.audioDurationSeconds != null && (
+                                    <span className="text-dark-500">{formatDuration(vf.audioDurationSeconds)}</span>
+                                  )}
+                                  {vf.exists && vf.actualSizeBytes != null && (
+                                    <span className="text-dark-500">{formatFileSize(vf.actualSizeBytes)}</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
                         <div className="mb-2">
-                          <div className="mb-1 text-[11px] text-dark-500">文件清单</div>
+                          <div className="mb-1 flex items-center justify-between">
+                            <div className="text-[11px] text-dark-500">文件清单</div>
+                          </div>
                           <div className="space-y-1">
                             {rec.files.map((f, i) => (
                               <div
@@ -782,21 +909,81 @@ export default function ExportCenter() {
                             ))}
                           </div>
                         </div>
+
+                        <div className="mb-2">
+                          <div className="mb-1 text-[11px] text-dark-500">发布状态</div>
+                          <div className="flex gap-1">
+                            {(['pending', 'exported', 'verified', 'delivered'] as DeliveryStatus[]).map((st) => (
+                              <button
+                                key={st}
+                                className={`flex-1 rounded px-0.5 py-0.5 text-[9px] font-medium transition-colors ${
+                                  rec.status === st
+                                    ? DELIVERY_STATUS_COLORS[st]
+                                    : 'bg-dark-700 text-dark-400 hover:bg-dark-600'
+                                }`}
+                                onClick={() => {
+                                  updateRecordStatus(rec.id, st);
+                                  if (st === 'verified' || st === 'delivered') {
+                                    setEpisodeDeliveryStatus(episode.id, st);
+                                  }
+                                }}
+                              >
+                                {DELIVERY_STATUS_LABELS[st]}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="mb-2 space-y-1.5">
+                          <div>
+                            <label className="mb-0.5 block text-[11px] text-dark-500">交付人</label>
+                            <input
+                              type="text"
+                              className="input w-full py-1 text-xs"
+                              placeholder="填写交付人姓名"
+                              value={rec.deliveredBy || ''}
+                              onChange={(e) => updateExportRecord(rec.id, { deliveredBy: e.target.value })}
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-0.5 block text-[11px] text-dark-500">备注</label>
+                            <textarea
+                              className="input w-full py-1 text-xs resize-none"
+                              placeholder="交付备注..."
+                              rows={2}
+                              value={rec.deliveryNotes || ''}
+                              onChange={(e) => updateExportRecord(rec.id, { deliveryNotes: e.target.value })}
+                            />
+                          </div>
+                        </div>
+
                         <div className="flex gap-1.5">
                           <button
-                            className="btn btn-secondary flex-1 flex items-center justify-center gap-1 text-xs py-1"
+                            className="btn btn-secondary flex-1 flex items-center justify-center gap-1 text-[10px] py-1"
+                            onClick={() => reVerifyRecord(rec)}
+                            disabled={!!verifyingRecordId || exporting}
+                          >
+                            {verifyingRecordId === rec.id ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <CheckCircle className="h-3 w-3" />
+                            )}
+                            重新校验
+                          </button>
+                          <button
+                            className="btn btn-secondary flex-1 flex items-center justify-center gap-1 text-[10px] py-1"
                             onClick={() => openRecordLocation(rec)}
                           >
                             <FolderOpen className="h-3 w-3" />
                             打开文件夹
                           </button>
                           <button
-                            className="btn btn-secondary flex-1 flex items-center justify-center gap-1 text-xs py-1"
+                            className="btn btn-secondary flex-1 flex items-center justify-center gap-1 text-[10px] py-1"
                             onClick={() => reExportFromRecord(rec)}
-                            disabled={exporting}
+                            disabled={exporting || !!verifyingRecordId}
                           >
                             <RefreshCw className="h-3 w-3" />
-                            按配置重新导出
+                            重新导出
                           </button>
                           <button
                             className="btn btn-ghost p-1 text-dark-500 hover:text-red-400"

@@ -8,6 +8,7 @@ export function usePersistence() {
   const episodes = useStore((s) => s.episodes);
   const templates = useStore((s) => s.templates);
   const currentEpisodeId = useStore((s) => s.currentEpisodeId);
+  const exportRecords = useStore((s) => s.exportRecords);
   const loadFromStorage = useStore((s) => s.loadFromStorage);
 
   useEffect(() => {
@@ -44,7 +45,7 @@ export function usePersistence() {
   useEffect(() => {
     const saveTimeout = setTimeout(async () => {
       try {
-        const state: AppState = { currentEpisodeId, episodes, templates };
+        const state: AppState = { currentEpisodeId, episodes, templates, exportRecords };
         const json = JSON.stringify(state, null, 2);
         if (window.electronAPI) {
           const dataPath = await window.electronAPI.getDataPath();
@@ -58,5 +59,5 @@ export function usePersistence() {
       }
     }, 500);
     return () => clearTimeout(saveTimeout);
-  }, [episodes, templates, currentEpisodeId]);
+  }, [episodes, templates, currentEpisodeId, exportRecords]);
 }

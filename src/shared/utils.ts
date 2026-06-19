@@ -20,6 +20,20 @@ export function formatTimestamp(seconds: number): string {
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
 }
 
+export const DELIVERY_STATUS_LABELS: Record<string, string> = {
+  pending: '待导出',
+  exported: '已导出',
+  verified: '已校验',
+  delivered: '已交付'
+};
+
+export const DELIVERY_STATUS_COLORS: Record<string, string> = {
+  pending: 'text-dark-400 bg-dark-700',
+  exported: 'text-primary-300 bg-primary-600/20',
+  verified: 'text-green-300 bg-green-600/20',
+  delivered: 'text-amber-300 bg-amber-600/20'
+};
+
 export function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;

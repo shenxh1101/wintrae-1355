@@ -2,6 +2,30 @@ export type AudioSource = 'host' | 'guest' | 'remote' | 'field' | 'music' | 'oth
 
 export type ExportMode = 'audio' | 'package';
 
+export type DeliveryStatus = 'pending' | 'exported' | 'verified' | 'delivered';
+
+export interface FileVerification {
+  fileName: string;
+  fileType: string;
+  expectedSizeBytes?: number;
+  actualSizeBytes?: number;
+  exists: boolean;
+  audioDurationSeconds?: number;
+  sizeMatch?: boolean;
+  durationMatch?: boolean;
+}
+
+export interface VerificationDigest {
+  verifiedAt: string;
+  allFilesExist: boolean;
+  allSizesMatch: boolean;
+  durationMatch: boolean;
+  totalAudioDurationSeconds?: number;
+  expectedDurationSeconds?: number;
+  files: FileVerification[];
+  summary: string;
+}
+
 export interface ExportFileRecord {
   fileName: string;
   fileType: 'audio' | 'description' | 'timeline' | 'cover' | 'releaseNotes';
@@ -12,6 +36,7 @@ export interface ExportRecord {
   id: string;
   episodeId: string;
   mode: ExportMode;
+  status: DeliveryStatus;
   exportedAt: string;
   targetPath: string;
   format: 'mp3' | 'wav';
@@ -24,6 +49,9 @@ export interface ExportRecord {
   coverTotal: number;
   files: ExportFileRecord[];
   preCheckWarnings: number;
+  verificationDigest?: VerificationDigest;
+  deliveredBy?: string;
+  deliveryNotes?: string;
 }
 
 export interface AudioMaterial {
@@ -103,6 +131,7 @@ export interface EpisodeProgress {
   createdAt: string;
   updatedAt: string;
   status: 'draft' | 'editing' | 'reviewing' | 'ready' | 'published';
+  deliveryStatus: DeliveryStatus;
   materials: AudioMaterial[];
   segments: ClipSegment[];
   chapters: ChapterMarker[];

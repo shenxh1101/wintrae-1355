@@ -31,6 +31,7 @@ function createNewEpisode(): EpisodeProgress {
     createdAt: now,
     updatedAt: now,
     status: 'draft',
+    deliveryStatus: 'pending',
     materials: [],
     segments: [],
     chapters: [],
@@ -80,7 +81,10 @@ interface Store extends AppState {
   deleteTemplate: (id: string) => void;
 
   addExportRecord: (record: Omit<ExportRecord, 'id'>) => void;
+  updateExportRecord: (id: string, updates: Partial<ExportRecord>) => void;
   deleteExportRecord: (id: string) => void;
+
+  setEpisodeDeliveryStatus: (episodeId: string, status: 'pending' | 'exported' | 'verified' | 'delivered') => void;
 
   loadFromStorage: (data: AppState) => void;
 }
@@ -419,12 +423,28 @@ export const useStore = create<Store>((set, get) => {
 
     addExportRecord: (record) =>
       set((state) => ({
-        exportRecords: [{ ...record, id: uuidv4() }, ...state.exportRecords]
+        exportRecords: [{ ...record, id: uuidv4(), status: record.status || 'exported' }, ...state.exportRecords]
+      })),
+
+    updateExportRecord: (id, updates) =>
+      set((state) => ({
+        exportRecords: state.exportRecords.map((r) =>
+          r.id === id ? { ...r, ...updates } : r
+        )
       })),
 
     deleteExportRecord: (id) =>
       set((state) => ({
         exportRecords: state.exportRecords.filter((r) => r.id !== id)
+      })),
+
+    setEpisodeDeliveryStatus: (episodeId, status) =>
+      set((state) => ({
+        episodes: state.episodes.map((ep) =>
+          ep.id === episodeId
+            ? { ...ep, deliveryStatus: status, updatedAt: new Date().toISOString() }
+            : ep
+        )
       })),
 
     loadFromStorage: (data) => set(data)

@@ -63,6 +63,8 @@ export default function EditingDesk() {
   const [normalizeResult, setNormalizeResult] = useState('');
   const [activeSidebarTab, setActiveSidebarTab] = useState<'templates' | 'chapters' | 'timeline'>('timeline');
   const [highlightedTimelineId, setHighlightedTimelineId] = useState<string | null>(null);
+  const [previewSource, setPreviewSource] = useState<'segment' | 'intro' | 'outro'>('segment');
+  const [waveformReloadTrigger, setWaveformReloadTrigger] = useState(0);
 
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
@@ -193,13 +195,18 @@ export default function EditingDesk() {
     setHighlightedTimelineId(item.id);
 
     if (item.type === 'intro') {
+      setPreviewSource('intro');
       if (intro) playTemplatePreview(intro);
       return;
     }
     if (item.type === 'outro') {
+      setPreviewSource('outro');
       if (outro) playTemplatePreview(outro);
       return;
     }
+
+    setPreviewSource('segment');
+    setWaveformReloadTrigger((prev) => prev + 1);
 
     if (item.type === 'segment' || item.type === 'chapter') {
       let targetMaterialId: string | null = null;
@@ -310,7 +317,7 @@ export default function EditingDesk() {
         wavesurferRef.current = null;
       }
     };
-  }, [selectedSegment?.materialId, selectedMaterial?.filePath]);
+  }, [selectedSegment?.materialId, selectedMaterial?.filePath, waveformReloadTrigger]);
 
   useEffect(() => {
     if (wavesurferRef.current && selectedSegment) {
@@ -557,7 +564,37 @@ export default function EditingDesk() {
             </div>
           )}
 
-          <div className="waveform-container mt-3">
+          <div className="mt-2 mb-2 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-dark-500">
+                当前预览：
+              </span>
+              <span className={`rounded px-2 py-0.5 text-xs font-medium ${
+                previewSource === 'segment'
+                  ? 'bg-primary-600/20 text-primary-300'
+                  : 'bg-purple-600/20 text-purple-300'
+              }`}>
+                {previewSource === 'segment'
+                  ? selectedSegment?.name || '片段'
+                  : previewSource === 'intro'
+                  ? `片头：${intro?.name || ''}`
+                  : `片尾：${outro?.name || ''}`}
+              </span>
+            </div>
+            {previewSource !== 'segment' && (
+              <button
+                className="btn btn-ghost text-xs text-dark-400 hover:text-dark-200"
+                onClick={() => {
+                  setPreviewSource('segment');
+                  setWaveformReloadTrigger((prev) => prev + 1);
+                }}
+              >
+                返回片段
+              </button>
+            )}
+          </div>
+
+          <div className="waveform-container">
             <div ref={waveformRef} />
           </div>
 
