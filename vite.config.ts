@@ -16,8 +16,14 @@ export default defineConfig({
       '@shared': path.resolve(__dirname, 'src/shared')
     }
   },
+  optimizeDeps: {
+    include: ['lamejs']
+  },
   build: {
     outDir: path.resolve(__dirname, 'dist/renderer'),
-    emptyOutDir: true
+    emptyOutDir: true,
+    commonjsOptions: {
+      include: [/lamejs/, /node_modules/]
+    }
   }
 });

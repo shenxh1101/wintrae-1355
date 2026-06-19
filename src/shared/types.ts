@@ -22,6 +22,9 @@ export interface ClipSegment {
   endTime: number;
   volume: number;
   notes?: string;
+  measuredLufs?: number;
+  gainAdjustment?: number;
+  normalizedVolume?: number;
 }
 
 export interface ChapterMarker {

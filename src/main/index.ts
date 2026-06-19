@@ -90,6 +90,17 @@ ipcMain.handle('fs:writeFile', async (_event, filePath: string, data: string) =>
   return true;
 });
 
+ipcMain.handle('fs:writeBinaryFile', async (_event, filePath: string, data: number[]) => {
+  const buf = Buffer.from(data);
+  fs.writeFileSync(filePath, buf);
+  return true;
+});
+
+ipcMain.handle('fs:readBinaryFile', async (_event, filePath: string) => {
+  const buf = fs.readFileSync(filePath);
+  return Array.from(buf);
+});
+
 ipcMain.handle('fs:fileExists', async (_event, filePath: string) => {
   return fs.existsSync(filePath);
 });

@@ -6,7 +6,6 @@ import {
   SkipForward,
   Scissors,
   Merge,
-  Plus,
   Trash2,
   Volume2,
   BookMarked,
@@ -16,11 +15,15 @@ import {
   GripVertical,
   ChevronDown,
   ChevronUp,
-  Flag
+  Flag,
+  Upload,
+  Loader2,
+  Check
 } from 'lucide-react';
 import WaveSurfer from 'wavesurfer.js';
 import { useStore, useCurrentEpisode } from '../store';
 import { formatDuration, formatTimestamp } from '@shared/utils';
+import { measureSegmentLufs, calculateGainForTarget } from '../utils/audioProcessor';
 
 export default function EditingDesk() {
   const episode = useCurrentEpisode();
@@ -40,6 +43,8 @@ export default function EditingDesk() {
   const setIntro = useStore((s) => s.setIntro);
   const setOutro = useStore((s) => s.setOutro);
   const setExportConfig = useStore((s) => s.setExportConfig);
+  const addTemplate = useStore((s) => s.addTemplate);
+  const deleteTemplate = useStore((s) => s.deleteTemplate);
 
   const [selectedSegmentId, setSelectedSegmentId] = useState<string | null>(
     segments.length > 0 ? segments[0].id : null
@@ -51,6 +56,8 @@ export default function EditingDesk() {
   const [newChapterTime, setNewChapterTime] = useState('');
   const [newChapterTitle, setNewChapterTitle] = useState('');
   const [volumeDb, setVolumeDb] = useState(episode?.targetVolumeDb || -16);
+  const [normalizing, setNormalizing] = useState(false);
+  const [normalizeResult, setNormalizeResult] = useState('');
 
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
@@ -94,7 +101,8 @@ export default function EditingDesk() {
 
     wavesurferRef.current.on('ready', () => {
       if (selectedSegment && wavesurferRef.current) {
-        wavesurferRef.current.setVolume(selectedSegment.volume);
+        const vol = selectedSegment.normalizedVolume ?? selectedSegment.volume;
+        wavesurferRef.current.setVolume(vol);
       }
     });
     wavesurferRef.current.on('audioprocess', () => {
@@ -116,9 +124,10 @@ export default function EditingDesk() {
 
   useEffect(() => {
     if (wavesurferRef.current && selectedSegment) {
-      wavesurferRef.current.setVolume(selectedSegment.volume);
+      const vol = selectedSegment.normalizedVolume ?? selectedSegment.volume;
+      wavesurferRef.current.setVolume(vol);
     }
-  }, [selectedSegment?.volume, selectedSegment?.id]);
+  }, [selectedSegment?.volume, selectedSegment?.normalizedVolume, selectedSegment?.id]);
 
   const togglePlay = () => {
     if (wavesurferRef.current) {
@@ -190,11 +199,86 @@ export default function EditingDesk() {
     setShowTemplates(false);
   };
 
-  const handleNormalizeVolume = () => {
-    const targetDb = volumeDb;
-    setExportConfig(episode!.exportFormat, episode!.exportBitrate, targetDb);
-    for (const seg of segments) {
-      updateSegment(seg.id, { volume: 1.0 });
+  const handleImportTemplate = async (type: 'intro' | 'outro') => {
+    try {
+      const filePaths: string[] = window.electronAPI
+        ? await window.electronAPI.openAudioFiles()
+        : [];
+      for (const fp of filePaths) {
+        const name = fp.split(/[\\/]/).pop() || '模板音频';
+        const baseName = name.replace(/\.[^.]+$/, '');
+        let duration = 0;
+        try {
+          const audio = new Audio();
+          audio.src = 'file:///' + fp.replace(/\\/g, '/');
+          await new Promise<void>((resolve) => {
+            audio.addEventListener('loadedmetadata', () => resolve(), { once: true });
+            audio.addEventListener('error', () => resolve(), { once: true });
+            setTimeout(() => resolve(), 3000);
+          });
+          duration = audio.duration || 0;
+        } catch {
+          /* ignore */
+        }
+        addTemplate({
+          name: baseName,
+          type,
+          filePath: fp,
+          duration,
+          volume: 1.0
+        });
+      }
+    } catch (e) {
+      console.error('Import template failed:', e);
+    }
+  };
+
+  const handleNormalizeVolume = async () => {
+    if (!episode || normalizing) return;
+    setNormalizing(true);
+    setNormalizeResult('正在分析片段响度...');
+
+    try {
+      const targetDb = volumeDb;
+      setExportConfig(episode.exportFormat, episode.exportBitrate, targetDb);
+
+      let processed = 0;
+      for (const seg of segments) {
+        const mat = episode.materials.find((m) => m.id === seg.materialId);
+        if (!mat) {
+          processed++;
+          continue;
+        }
+        try {
+          setNormalizeResult(`正在分析 ${seg.name} (${processed + 1}/${segments.length})...`);
+          const measuredLufs = await measureSegmentLufs(mat.filePath, seg.startTime, seg.endTime);
+          const gain = calculateGainForTarget(measuredLufs, targetDb);
+          const newVolume = seg.volume * gain;
+          const clampedVolume = Math.max(0, Math.min(3, newVolume));
+          updateSegment(seg.id, {
+            measuredLufs,
+            gainAdjustment: gain,
+            normalizedVolume: clampedVolume
+          });
+        } catch (e) {
+          console.error(`Failed to measure segment ${seg.name}:`, e);
+          updateSegment(seg.id, {
+            measuredLufs: -70,
+            gainAdjustment: 1,
+            normalizedVolume: seg.volume
+          });
+        }
+        processed++;
+      }
+
+      setNormalizeResult(`音量统一完成！目标 ${targetDb} LUFS，已处理 ${processed} 个片段`);
+      setTimeout(() => setNormalizeResult(''), 5000);
+    } catch (e) {
+      console.error('Normalize failed:', e);
+      setNormalizeResult(`处理失败: ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setNormalizeResult(''), 5000);
+    } finally {
+      setNormalizing(false);
     }
   };
 
@@ -259,11 +343,29 @@ export default function EditingDesk() {
               <button
                 className="btn btn-secondary flex items-center gap-1.5"
                 onClick={handleNormalizeVolume}
+                disabled={normalizing}
               >
-                统一音量
+                {normalizing ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    处理中...
+                  </>
+                ) : (
+                  '统一音量'
+                )}
               </button>
             </div>
           </div>
+
+          {normalizeResult && (
+            <div className={`mt-2 rounded-md px-3 py-2 text-xs ${
+              normalizeResult.includes('失败') ? 'bg-red-500/10 text-red-300' :
+              normalizeResult.includes('完成') ? 'bg-green-500/10 text-green-300' :
+              'bg-primary-500/10 text-primary-300'
+            }`}>
+              {normalizeResult}
+            </div>
+          )}
 
           <div className="waveform-container mt-3">
             <div ref={waveformRef} />
@@ -321,6 +423,8 @@ export default function EditingDesk() {
               const mat = episode?.materials.find((m) => m.id === seg.materialId);
               const isSelected = seg.id === selectedSegmentId;
               const isMergeSelected = selectedSegmentsForMerge.includes(seg.id);
+              const effectiveVolume = seg.normalizedVolume ?? seg.volume;
+              const hasNormalization = seg.normalizedVolume !== undefined;
               return (
                 <div
                   key={seg.id}
@@ -367,22 +471,32 @@ export default function EditingDesk() {
                         </span>
                         <span className="inline-flex items-center gap-1">
                           <Volume2 className="h-3 w-3" />
-                          {Math.round(seg.volume * 100)}%
+                          {Math.round(effectiveVolume * 100)}%
                         </span>
+                        {hasNormalization && seg.measuredLufs !== undefined && (
+                          <span className="inline-flex items-center gap-1 rounded bg-green-500/10 px-1.5 py-0.5 text-green-300">
+                            <Check className="h-3 w-3" />
+                            {seg.measuredLufs} LUFS → {volumeDb} LUFS
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       <input
                         type="range"
                         min={0}
-                        max={2}
+                        max={3}
                         step={0.05}
-                        value={seg.volume}
+                        value={effectiveVolume}
                         className="w-24"
                         onClick={(e) => e.stopPropagation()}
-                        onChange={(e) =>
-                          updateSegment(seg.id, { volume: parseFloat(e.target.value) })
-                        }
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          updateSegment(seg.id, {
+                            volume: val,
+                            normalizedVolume: hasNormalization ? val : undefined
+                          });
+                        }}
                       />
                       <button
                         className="btn btn-ghost p-1.5 text-red-400 hover:text-red-300"
@@ -453,7 +567,7 @@ export default function EditingDesk() {
             </div>
           )}
 
-          {segments.length === 0 && (
+          {segments.length === 0 && !intro && !outro && (
             <div className="flex h-40 flex-col items-center justify-center text-dark-500">
               <Scissors className="mb-2 h-10 w-10 opacity-50" />
               <p className="text-sm">暂无剪辑片段</p>
@@ -464,7 +578,7 @@ export default function EditingDesk() {
       </div>
 
       <aside className="flex w-80 flex-col border-l border-dark-800 bg-dark-900">
-        <div className="relative border-b border-dark-800 p-4">
+        <div className="border-b border-dark-800 p-4">
           <button
             className="flex w-full items-center justify-between"
             onClick={() => setShowTemplates((v) => !v)}
@@ -480,43 +594,103 @@ export default function EditingDesk() {
             )}
           </button>
           {showTemplates && (
-            <div className="mt-3 space-y-2">
-              <div className="text-xs text-dark-500">片头</div>
-              {templates.filter((t) => t.type === 'intro').length === 0 && (
-                <div className="text-xs text-dark-600">暂无片头模板</div>
-              )}
-              {templates
-                .filter((t) => t.type === 'intro')
-                .map((tpl) => (
+            <div className="mt-3 space-y-3">
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-xs font-medium text-dark-500">片头模板</span>
                   <button
-                    key={tpl.id}
-                    className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm hover:bg-dark-800 ${
-                      intro?.id === tpl.id ? 'bg-primary-600/20 text-primary-300' : 'text-dark-300'
-                    }`}
-                    onClick={() => handleApplyIntroTemplate(tpl.id)}
+                    className="btn btn-ghost flex items-center gap-1 text-xs text-primary-400 hover:text-primary-300"
+                    onClick={() => handleImportTemplate('intro')}
                   >
-                    <span>{tpl.name}</span>
-                    <span className="text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
+                    <Upload className="h-3 w-3" />
+                    添加
                   </button>
-                ))}
-              <div className="mt-3 text-xs text-dark-500">片尾</div>
-              {templates.filter((t) => t.type === 'outro').length === 0 && (
-                <div className="text-xs text-dark-600">暂无片尾模板</div>
-              )}
-              {templates
-                .filter((t) => t.type === 'outro')
-                .map((tpl) => (
+                </div>
+                {templates.filter((t) => t.type === 'intro').length === 0 ? (
+                  <div className="text-xs text-dark-600">暂无，点击「添加」导入本地音频</div>
+                ) : (
+                  <div className="space-y-1">
+                    {templates
+                      .filter((t) => t.type === 'intro')
+                      .map((tpl) => (
+                        <div
+                          key={tpl.id}
+                          className={`flex items-center justify-between rounded px-2 py-1.5 text-sm ${
+                            intro?.id === tpl.id
+                              ? 'bg-primary-600/20 text-primary-300'
+                              : 'text-dark-300 hover:bg-dark-800'
+                          }`}
+                        >
+                          <button
+                            className="flex-1 text-left"
+                            onClick={() => handleApplyIntroTemplate(tpl.id)}
+                          >
+                            <span>{tpl.name}</span>
+                            <span className="ml-2 text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
+                          </button>
+                          <button
+                            className="btn btn-ghost p-0.5 text-dark-500 hover:text-red-400"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteTemplate(tpl.id);
+                              if (intro?.id === tpl.id) setIntro(undefined);
+                            }}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-xs font-medium text-dark-500">片尾模板</span>
                   <button
-                    key={tpl.id}
-                    className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-sm hover:bg-dark-800 ${
-                      outro?.id === tpl.id ? 'bg-primary-600/20 text-primary-300' : 'text-dark-300'
-                    }`}
-                    onClick={() => handleApplyOutroTemplate(tpl.id)}
+                    className="btn btn-ghost flex items-center gap-1 text-xs text-primary-400 hover:text-primary-300"
+                    onClick={() => handleImportTemplate('outro')}
                   >
-                    <span>{tpl.name}</span>
-                    <span className="text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
+                    <Upload className="h-3 w-3" />
+                    添加
                   </button>
-                ))}
+                </div>
+                {templates.filter((t) => t.type === 'outro').length === 0 ? (
+                  <div className="text-xs text-dark-600">暂无，点击「添加」导入本地音频</div>
+                ) : (
+                  <div className="space-y-1">
+                    {templates
+                      .filter((t) => t.type === 'outro')
+                      .map((tpl) => (
+                        <div
+                          key={tpl.id}
+                          className={`flex items-center justify-between rounded px-2 py-1.5 text-sm ${
+                            outro?.id === tpl.id
+                              ? 'bg-primary-600/20 text-primary-300'
+                              : 'text-dark-300 hover:bg-dark-800'
+                          }`}
+                        >
+                          <button
+                            className="flex-1 text-left"
+                            onClick={() => handleApplyOutroTemplate(tpl.id)}
+                          >
+                            <span>{tpl.name}</span>
+                            <span className="ml-2 text-xs text-dark-500">{formatDuration(tpl.duration)}</span>
+                          </button>
+                          <button
+                            className="btn btn-ghost p-0.5 text-dark-500 hover:text-red-400"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteTemplate(tpl.id);
+                              if (outro?.id === tpl.id) setOutro(undefined);
+                            }}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

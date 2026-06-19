@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useStore } from './store';
+import { useStore } from '../store';
 import type { AppState } from '@shared/types';
 
 const STORAGE_KEY = 'podcast-studio-state';

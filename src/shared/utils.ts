@@ -28,16 +28,26 @@ export function formatFileSize(bytes: number): string {
 }
 
 export function parseTimeString(str: string): number | null {
-  const parts = str.split(':');
+  const trimmed = str.trim();
+  if (!trimmed) return null;
+
+  const bareNum = parseFloat(trimmed);
+  if (!isNaN(bareNum) && !trimmed.includes(':')) {
+    return bareNum >= 0 ? bareNum : null;
+  }
+
+  const parts = trimmed.split(':');
   if (parts.length === 2) {
     const m = parseFloat(parts[0]);
     const s = parseFloat(parts[1]);
-    if (!isNaN(m) && !isNaN(s)) return m * 60 + s;
+    if (!isNaN(m) && !isNaN(s) && m >= 0 && s >= 0) return m * 60 + s;
   } else if (parts.length === 3) {
     const h = parseFloat(parts[0]);
     const m = parseFloat(parts[1]);
     const s = parseFloat(parts[2]);
-    if (!isNaN(h) && !isNaN(m) && !isNaN(s)) return h * 3600 + m * 60 + s;
+    if (!isNaN(h) && !isNaN(m) && !isNaN(s) && h >= 0 && m >= 0 && s >= 0) {
+      return h * 3600 + m * 60 + s;
+    }
   }
   return null;
 }

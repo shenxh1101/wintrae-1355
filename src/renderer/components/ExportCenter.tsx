@@ -14,11 +14,14 @@ import {
   Hash,
   Clock,
   Volume2,
-  AlertCircle
+  AlertCircle,
+  Loader2
 } from 'lucide-react';
 import { useStore, useCurrentEpisode } from '../store';
-import { formatDuration, formatTimestamp, EPISODE_STATUS_LABELS } from '@shared/utils';
+import { formatDuration, formatTimestamp, EPISODE_STATUS_LABELS, parseTimeString } from '@shared/utils';
 import type { TimelineEntry, EpisodeProgress } from '@shared/types';
+import { renderEpisodeAudio } from '../utils/audioProcessor';
+import { encodeWav, encodeMp3 } from '../utils/audioEncoder';
 
 export default function ExportCenter() {
   const episode = useCurrentEpisode();
@@ -32,6 +35,8 @@ export default function ExportCenter() {
   const [newTimelineTime, setNewTimelineTime] = useState('');
   const [newTimelineTitle, setNewTimelineTitle] = useState('');
   const [newTimelineDesc, setNewTimelineDesc] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState('');
 
   if (!episode) return null;
 
@@ -78,7 +83,8 @@ export default function ExportCenter() {
 
   const handleAddTimeline = () => {
     if (!newTimelineTitle.trim()) return;
-    const time = parseFloat(newTimelineTime) || 0;
+    const parsed = parseTimeString(newTimelineTime);
+    const time = parsed !== null ? parsed : 0;
     const entry: TimelineEntry = {
       time,
       title: newTimelineTitle.trim(),
@@ -96,18 +102,61 @@ export default function ExportCenter() {
   };
 
   const handleExportAudio = async () => {
+    if (exporting || !episode) return;
+    if (episode.segments.length === 0 && !episode.intro && !episode.outro) {
+      alert('没有可导出的音频内容，请先在剪辑台添加片段。');
+      return;
+    }
+
+    setExporting(true);
+    setExportProgress('正在选择保存路径...');
+
     try {
+      const ext = episode.exportFormat;
+      const safeTitle = (episode.title || 'episode').replace(/[\\/:*?"<>|]/g, '_');
+      const defaultName = `${episode.episodeNumber ? episode.episodeNumber + ' - ' : ''}${safeTitle}.${ext}`;
+
+      let filePath: string | undefined;
       if (window.electronAPI) {
-        const ext = episode.exportFormat;
-        const safeTitle = (episode.title || 'episode').replace(/[\\/:*?"<>|]/g, '_');
-        const defaultName = `${episode.episodeNumber ? episode.episodeNumber + ' - ' : ''}${safeTitle}.${ext}`;
-        const path = await window.electronAPI.saveFile(defaultName);
-        if (path) {
-          alert(`导出路径已选择：${path}\n\n注意：实际音频编码处理需要集成 ffmpeg 等音频处理库，当前版本为演示数据导出。`);
-        }
+        filePath = await window.electronAPI.saveFile(defaultName);
       }
+      if (!filePath) {
+        setExporting(false);
+        setExportProgress('');
+        return;
+      }
+
+      setExportProgress('正在解码音频素材...');
+      const rendered = await renderEpisodeAudio(episode, episode.targetVolumeDb);
+
+      setExportProgress(`正在编码为 ${ext.toUpperCase()} ...`);
+      let fileData: ArrayBuffer | Int8Array;
+
+      if (ext === 'wav') {
+        fileData = encodeWav(rendered);
+      } else if (ext === 'mp3') {
+        fileData = await encodeMp3(rendered, episode.exportBitrate);
+      } else {
+        fileData = encodeWav(rendered);
+        filePath = filePath.replace(/\.[^.]+$/, '.wav');
+      }
+
+      setExportProgress('正在写入文件...');
+      if (window.electronAPI) {
+        const arr = fileData instanceof Int8Array
+          ? Array.from(fileData)
+          : Array.from(new Uint8Array(fileData));
+        await window.electronAPI.writeBinaryFile(filePath, arr);
+      }
+
+      setExportProgress('导出完成！');
+      setTimeout(() => setExportProgress(''), 3000);
     } catch (e) {
-      console.error(e);
+      console.error('Export failed:', e);
+      setExportProgress(`导出失败: ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setExportProgress(''), 5000);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -451,10 +500,29 @@ export default function ExportCenter() {
           <button
             className="btn btn-primary flex w-full items-center justify-center gap-2 py-2.5 text-base"
             onClick={handleExportAudio}
+            disabled={exporting}
           >
-            <Download className="h-5 w-5" />
-            导出音频文件
+            {exporting ? (
+              <>
+                <Loader2 className="h-5 w-5 animate-spin" />
+                导出中...
+              </>
+            ) : (
+              <>
+                <Download className="h-5 w-5" />
+                导出音频文件
+              </>
+            )}
           </button>
+          {exportProgress && (
+            <div className={`mt-2 rounded-md px-3 py-2 text-xs ${
+              exportProgress.includes('失败') ? 'bg-red-500/10 text-red-300' :
+              exportProgress.includes('完成') ? 'bg-green-500/10 text-green-300' :
+              'bg-primary-500/10 text-primary-300'
+            }`}>
+              {exportProgress}
+            </div>
+          )}
           <button
             className="btn btn-secondary mt-2 flex w-full items-center justify-center gap-1.5"
             onClick={() => {

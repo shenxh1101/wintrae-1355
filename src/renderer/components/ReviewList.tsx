@@ -18,6 +18,7 @@ import {
 import { useStore, useCurrentEpisode } from '../store';
 import {
   formatTimestamp,
+  parseTimeString,
   REVIEW_ISSUE_LABELS,
   REVIEW_STATUS_LABELS
 } from '@shared/utils';
@@ -96,7 +97,8 @@ export default function ReviewList() {
 
   const handleSubmit = () => {
     if (!newDesc.trim()) return;
-    const time = parseFloat(newTime) || 0;
+    const parsedTime = parseTimeString(newTime);
+    const time = parsedTime !== null ? parsedTime : 0;
     addReviewItem({
       segmentId: newSegmentId,
       time,
@@ -188,11 +190,11 @@ export default function ReviewList() {
         <div className="border-b border-dark-800 bg-dark-850 p-4" style={{ background: '#1a2332' }}>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label mb-1 block">时间点 (秒)</label>
+              <label className="label mb-1 block">时间点</label>
               <input
                 type="text"
                 className="input w-full font-mono"
-                placeholder="如 120.5 或 02:00.500"
+                placeholder="如 120.5 / 02:00.500 / 01:02:03.000"
                 value={newTime}
                 onChange={(e) => setNewTime(e.target.value)}
               />
